@@ -152,4 +152,16 @@ describe("MCP client over HTTP", () => {
     expect(second).toEqual(first);
     expect(rpcLog.length).toBe(countAfterFirst);
   });
+
+  it("resetMcpState clears cached specs and sessions", async () => {
+    await getMcpToolSpecs([serverConfig()]);
+    resetMcpState();
+    rpcLog.length = 0;
+    await getMcpToolSpecs([serverConfig()]);
+    expect(rpcLog.map((r) => r.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+    ]);
+  });
 });

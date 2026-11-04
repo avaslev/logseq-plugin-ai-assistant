@@ -107,6 +107,14 @@ export function stripThinkTags(text: string): string {
 const THINK_OPEN = "<think>";
 const THINK_CLOSE = "</think>";
 
+function partialTagPrefixLength(text: string): number {
+  const max = Math.min(THINK_OPEN.length - 1, text.length);
+  for (let len = max; len > 0; len--) {
+    if (THINK_OPEN.startsWith(text.slice(-len))) return len;
+  }
+  return 0;
+}
+
 export function createStreamAccumulator(
   onDelta: (text: string) => void,
   onReasoning?: (text: string) => void
@@ -152,14 +160,9 @@ export function createStreamAccumulator(
       inThink = true;
       return true;
     }
-    const ltIdx = pending.lastIndexOf("<");
-    if (ltIdx === -1) {
-      emitVisible(pending);
-      pending = "";
-      return false;
-    }
-    const safe = pending.slice(0, ltIdx);
-    pending = pending.slice(ltIdx);
+    const hold = partialTagPrefixLength(pending);
+    const safe = hold > 0 ? pending.slice(0, pending.length - hold) : pending;
+    pending = hold > 0 ? pending.slice(pending.length - hold) : "";
     emitVisible(safe);
     return false;
   };

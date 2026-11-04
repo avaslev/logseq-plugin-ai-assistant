@@ -173,6 +173,25 @@ describe("createStreamAccumulator", () => {
     expect(reasoningDeltas.length).toBeGreaterThan(1);
   });
 
+  it("streams text containing a lone '<' without stalling", () => {
+    const deltas: string[] = [];
+    const acc = createStreamAccumulator((text) => deltas.push(text));
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "a < b" } }] }));
+    acc.processLine(sseEvent({ choices: [{ delta: { content: " and c" } }] }));
+    expect(deltas).toEqual(["a < b", "a < b and c"]);
+    expect(acc.result().content).toBe("a < b and c");
+  });
+
+  it("streams '<div>' content without stalling", () => {
+    const deltas: string[] = [];
+    const acc = createStreamAccumulator((text) => deltas.push(text));
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "x " } }] }));
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "<di" } }] }));
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "v>y" } }] }));
+    expect(deltas).toEqual(["x ", "x <di", "x <div>y"]);
+    expect(acc.result().content).toBe("x <div>y");
+  });
+
   it("merges split tool_calls by index", () => {
     const acc = createStreamAccumulator(() => {});
     acc.processLine(

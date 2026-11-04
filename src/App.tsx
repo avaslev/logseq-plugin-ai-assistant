@@ -346,13 +346,18 @@ function App() {
     setPending(true);
     setHasInput(false);
     field!.value = "";
-    await sendMessage(
-      content,
-      selectedModel || getDefaultModel()
-    );
-    setPending(false);
-    autoResize();
-    field?.focus();
+    try {
+      await sendMessage(content, selectedModel || getDefaultModel());
+    } catch (err) {
+      void logseq.UI.showMsg(
+        `AI assistant: ${err instanceof Error ? err.message : String(err)}`,
+        "error"
+      );
+    } finally {
+      setPending(false);
+      autoResize();
+      field?.focus();
+    }
   };
 
   const canSend = !pending && hasInput;

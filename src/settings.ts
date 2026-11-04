@@ -1,6 +1,7 @@
 import "@logseq/libs";
 import type { SettingSchemaDesc } from "@logseq/libs/dist/LSPlugin";
 import { listModels } from "./llm";
+import { resetMcpState } from "./mcp";
 
 const DEFAULTS = {
   apiBaseUrl: "http://localhost:1234/v1",
@@ -169,6 +170,7 @@ export function initSettings(): void {
   let prevBaseUrl = getSettings().apiBaseUrl;
   let prevApiKey = getSettings().apiKey;
   let prevDefaultModel = getSettings().defaultModel;
+  let prevMcpServers = getSettings().mcpServers;
   logseq.onSettingsChanged(() => {
     const settings = getSettings();
     if (
@@ -183,6 +185,10 @@ export function initSettings(): void {
       prevDefaultModel = settings.defaultModel;
       const model = getDefaultModel();
       defaultModelListeners.forEach((cb) => cb(model));
+    }
+    if (settings.mcpServers !== prevMcpServers) {
+      prevMcpServers = settings.mcpServers;
+      resetMcpState();
     }
   });
 }
