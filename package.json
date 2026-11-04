@@ -1,6 +1,7 @@
 {
-  "name": "logseq-plugin-ai-assistant",
+  "name": "logseq-ai-graph-assistant",
   "version": "0.1.0",
+  "description": "OpenAI-compatible AI agent for Logseq: streaming chat, graph-aware tools and MCP servers, with conversations stored in your graph.",
   "main": "dist/index.html",
   "scripts": {
     "dev": "vite",
@@ -39,7 +40,7 @@
     "vitest": "5.1.0"
   },
   "logseq": {
-    "id": "logseq-ai-assistant",
+    "id": "logseq-ai-graph-assistant",
     "icon": "./logo.svg"
   }
 }

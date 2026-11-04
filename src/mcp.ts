@@ -29,7 +29,7 @@ export function parseMcpServers(json: string): McpServerConfig[] {
     }));
 }
 
-const CLIENT_INFO = { name: "logseq-ai-assistant", version: "0.1.0" };
+const CLIENT_INFO = { name: "logseq-ai-graph-assistant", version: "0.1.0" };
 
 let rpcId = 0;
 const sessionIds = new Map<string, string>();

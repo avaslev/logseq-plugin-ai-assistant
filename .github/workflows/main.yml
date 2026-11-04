@@ -3,7 +3,7 @@
 name: Releases
 
 env:
-  PLUGIN_NAME: logseq-plugin-ai-assistant
+  PLUGIN_NAME: logseq-ai-graph-assistant
 
 # Controls when the action will run.
 on:
