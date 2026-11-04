@@ -1,18 +1,46 @@
-# Logseq Plugin Template React 🚀
+# Logseq AI Assistant
 
-## Features
+Плагин для [Logseq](https://logseq.com), добавляющий чат-интерфейс с AI-ассистентом. Переписка хранится в графе: каждая сессия — отдельная страница в неймспейсе `ai_assistant/`.
 
-- Plug-and-play boilerplate with properly defined GitHub action defaults
-- Develop with HMR, empowered by lightning-fast Vite ⚡ with [vite-logseq-plugin](https://github.com/pengx17/vite-plugin-logseq)
-- TailwindCSS for styling
-- Pnpm
+## Возможности
 
-## How to get started
-1. Clone the repository or use the button "Use this template" on GitHub to create your own version of the repository 🔨
-2. Make sure you have pnpm installed, [install](https://pnpm.io/installation) if necessary 🛠
-3. Execute `pnpm install` 📦
-4. Change the plugin-name in `package.json` to your liking. Adapt both the package-name and the plugin-id at the bottom of the `package.json`. Make sure that they are not conflicting with plugins you already installed. 📝
-5. Execute `pnpm build` to build the plugin 🚧
-6. Enable developer-mode in Logseq, go to plugins, select "Load unpacked plugin" 🔌
-7. Select the directory of your plugin (not the `/dist`-directory, but the directory which includes your package.json) 📂
-8. Enjoy! 🎉
+- 🤖 Иконка в тулбаре плагинов — открывает страницу `ai_assistant` со списком всех сессий
+- 💬 Поле ввода внизу правой панели Logseq (появляется автоматически, когда панель открыта)
+- Многострочный ввод: Enter — отправка, Shift+Enter — новая строка, авторост поля
+- Кнопка отправки в стиле современных чатов (круглая, активна при наличии текста)
+- Футер под полем ввода: целевая страница сессии и название модели
+- Сессии создаются лениво: при первой отправке, если активной страницы ассистента в панели нет
+- Имя страницы сессии: `ai_assistant/20261104_143205_начало-сообщения` (санитизация спецсимволов, лимит 40 символов)
+- Первый блок сессии — метаданные: `model::`, `started::`
+- Мок-ответы агента: блок «🤔 Thinking…» заменяется ответом через 3 секунды
+- Адаптация под тему Logseq (светлая/тёмная/кастомные) через CSS-переменные `--ls-*`
+
+## Как это работает
+
+1. Откройте правую панель Logseq — внизу появится поле ввода
+2. Введите сообщение и отправьте (Enter или кнопка ↑)
+3. Если открытой страницы-сессии нет — создастся новая `ai_assistant/<дата>_<начало сообщения>` с мета-блоком, и сообщение уйдёт туда
+4. Ответ агента появится следующим блоком на странице сессии
+
+## Разработка
+
+Требуется Node.js и npm.
+
+```bash
+npm install
+npm run dev     # дев-режим с HMR
+npm run build   # прод-сборка (tsc && vite build)
+```
+
+Подключение к Logseq: включите режим разработчика → Плагины → «Load unpacked plugin» → выберите корневую папку проекта (с `package.json`).
+
+## Структура
+
+- `src/main.tsx` — регистрация плагина, иконка в тулбаре
+- `src/App.tsx` — форма ввода, отслеживание правой панели, синхронизация сессии
+- `src/chat.ts` — работа с сессиями и страницами графа (создание, мета-данные, отправка сообщений)
+- `src/utils.ts` — подписка на видимость Main UI
+
+## Стек
+
+TypeScript, React 18, Vite, TailwindCSS, [@logseq/libs](https://github.com/logseq/logseq), npm.

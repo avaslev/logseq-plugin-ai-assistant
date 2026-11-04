@@ -1,11 +1,10 @@
 {
-  "name": "logseq-plugin-template-react",
-  "version": "0.0.0",
+  "name": "logseq-plugin-ai-assistant",
+  "version": "0.1.0",
   "main": "dist/index.html",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "preinstall": "npx only-allow pnpm"
+    "build": "tsc && vite build"
   },
   "license": "MIT",
   "dependencies": {
@@ -37,7 +36,7 @@
     "vite-plugin-logseq": "1.1.2"
   },
   "logseq": {
-    "id": "_pengx17-logseq-template-react",
+    "id": "logseq-ai-assistant",
     "icon": "./logo.svg"
   }
 }

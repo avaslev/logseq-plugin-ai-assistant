@@ -2,3 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+html,
+body {
+  background: transparent;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.ai-assistant-input:focus {
+  border-color: var(--ls-primary-accent-color);
+}
+
+.ai-assistant-input::placeholder {
+  color: var(--ls-secondary-text-color);
+}
+
+.ai-assistant-box:focus-within {
+  border-color: var(--ls-primary-accent-color);
+}
+

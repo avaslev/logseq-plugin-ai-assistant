@@ -3,7 +3,7 @@
 name: Releases
 
 env:
-  PLUGIN_NAME: logseq-plugin-template-react
+  PLUGIN_NAME: logseq-plugin-ai-assistant
 
 # Controls when the action will run.
 on:
@@ -26,11 +26,8 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: "16"
-      - uses: pnpm/action-setup@v2.4.1
-        with:
-          version: 6.35.1
-      - run: pnpm install
-      - run: pnpm build
+      - run: npm ci
+      - run: npm run build
       - name: Install zip
         uses: montudor/action-zip@v1
       - name: Release
