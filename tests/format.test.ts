@@ -3,7 +3,7 @@ import {
   buildSystemPrompt,
   historyFromTree,
   sanitizeSessionSlug,
-  splitReplyIntoBlocks,
+  toSingleBlockContent,
 } from "../src/format";
 
 describe("sanitizeSessionSlug", () => {
@@ -25,96 +25,42 @@ describe("sanitizeSessionSlug", () => {
   });
 });
 
-describe("splitReplyIntoBlocks", () => {
-  it("splits by newline into parent blocks", () => {
-    const blocks = splitReplyIntoBlocks("first\nsecond\nthird");
-    expect(blocks.map((b) => b.content)).toEqual(["first", "second", "third"]);
-    expect(blocks.every((b) => b.children.length === 0)).toBe(true);
-  });
-
-  it("indented lines become children of the previous block", () => {
-    const blocks = splitReplyIntoBlocks("parent\n  child1\n  child2\nnext");
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0]).toEqual({
-      content: "parent",
-      children: ["child1", "child2"],
-    });
-    expect(blocks[1].content).toBe("next");
-  });
-
-  it("skips empty lines", () => {
-    const blocks = splitReplyIntoBlocks("a\n\n\nb");
-    expect(blocks.map((b) => b.content)).toEqual(["a", "b"]);
-  });
-
-  it("attaches bullet lists as children of the intro line", () => {
-    const blocks = splitReplyIntoBlocks("Here are the names:\n- Alice\n- Bob");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].content).toBe("Here are the names:");
-    expect(blocks[0].children).toEqual(["- Alice", "- Bob"]);
-  });
-
-  it("treats numbered items as bullets of the intro", () => {
-    const blocks = splitReplyIntoBlocks("Steps:\n1. first\n2. second");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].children).toEqual(["1. first", "2. second"]);
-  });
-
-  it("makes a bullet list without intro sibling top-level blocks", () => {
-    const blocks = splitReplyIntoBlocks("- Alice\n- Bob\n- Carol");
-    expect(blocks.map((b) => b.content)).toEqual([
-      "- Alice",
-      "- Bob",
-      "- Carol",
-    ]);
-    expect(blocks.every((b) => b.children.length === 0)).toBe(true);
-  });
-
-  it("merges description lines into the preceding bullet block", () => {
-    const blocks = splitReplyIntoBlocks(
-      "- Berlin\nCapital of Germany\n- Paris\nCapital of France"
+describe("toSingleBlockContent", () => {
+  it("joins all lines into one block content with real line breaks", () => {
+    expect(toSingleBlockContent("Intro:\n- Alice\n- Bob")).toBe(
+      "Intro:\n• Alice\n• Bob"
     );
-    expect(blocks.map((b) => b.content)).toEqual([
-      "- Berlin Capital of Germany",
-      "- Paris Capital of France",
-    ]);
   });
 
-  it("starts a new block for text after an empty line", () => {
-    const blocks = splitReplyIntoBlocks(
-      "Here are the names:\n- Alice\n- Bob\n\nConclusion here"
+  it("strips the leading bullet marker from the first line", () => {
+    expect(toSingleBlockContent("• Hello there\nsecond line")).toBe(
+      "Hello there\nsecond line"
     );
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0].content).toBe("Here are the names:");
-    expect(blocks[0].children).toEqual(["- Alice", "- Bob"]);
-    expect(blocks[1].content).toBe("Conclusion here");
+    expect(toSingleBlockContent("- Answer here")).toBe("Answer here");
   });
 
-  it("starts a new block for non-bullet lines after a list", () => {
-    const blocks = splitReplyIntoBlocks("Intro:\n- a\n- b\nConclusion here");
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0].children).toEqual(["- a", "- b"]);
-    expect(blocks[1].content).toBe("Conclusion here");
-    expect(blocks[1].children).toEqual([]);
+  it("trims lines and drops empty ones", () => {
+    expect(toSingleBlockContent("  a  \n\n\n  b \n")).toBe("a\nb");
   });
 
-  it("converts literal-\\n lists into one line with bullet separators", () => {
-    const blocks = splitReplyIntoBlocks("Names:\\n- Alice\\n- Bob");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].content).toBe("Names: • Alice • Bob");
-    expect(blocks[0].children).toEqual([]);
+  it("returns single trimmed line for single-line reply", () => {
+    expect(toSingleBlockContent("  just text  ")).toBe("just text");
   });
 
-  it("keeps compact bullet lists written with bullets on one line", () => {
-    const blocks = splitReplyIntoBlocks("• Alice\\n• Bob\\n• Carol");
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0].content).toBe("• Alice • Bob • Carol");
-    expect(blocks[0].children).toEqual([]);
+  it("returns empty string for empty reply", () => {
+    expect(toSingleBlockContent("\n\n")).toBe("");
   });
 
-  it("returns empty array for empty reply", () => {
-    expect(splitReplyIntoBlocks("")).toEqual([]);
-    expect(splitReplyIntoBlocks("\n\n  \n")).toEqual([]);
+  it("drops think tag fragment lines", () => {
+    expect(
+      toSingleBlockContent("/think\n</think>\n37 × 43 = 1591.")
+    ).toBe("37 × 43 = 1591.");
+  });
+
+  it("converts markdown bullets to plain bullet chars and strips headings", () => {
+    expect(
+      toSingleBlockContent("# Cities\n- Berlin\n- Paris")
+    ).toBe("Cities\n• Berlin\n• Paris");
   });
 });
 
@@ -154,7 +100,7 @@ describe("historyFromTree", () => {
     const result = historyFromTree([
       { content: "meta" },
       { content: "q" },
-      { content: "🤔 Thinking…" },
+      { content: "💭 Думаю…" },
       { content: "  " },
       { content: "answer" },
     ]);
@@ -163,15 +109,37 @@ describe("historyFromTree", () => {
       { role: "assistant", content: "answer" },
     ]);
   });
+
+  it("skips error and cancel placeholders", () => {
+    const result = historyFromTree([
+      { content: "meta" },
+      { content: "q1" },
+      { content: "⚠️ LLM request failed: model runner stopped" },
+      { content: "q2" },
+      { content: "⏹ Cancelled" },
+      { content: "q3" },
+      { content: "(empty reply)" },
+      { content: "q4" },
+      { content: "final answer" },
+    ]);
+    expect(result).toEqual([
+      { role: "user", content: "q1" },
+      { role: "user", content: "q2" },
+      { role: "user", content: "q3" },
+      { role: "user", content: "q4" },
+      { role: "assistant", content: "final answer" },
+    ]);
+  });
 });
 
 describe("buildSystemPrompt", () => {
-  it("contains Logseq block rules and reference rules", () => {
+  it("describes the single-block answer format", () => {
     const prompt = buildSystemPrompt();
-    expect(prompt).toContain("NEW block");
-    expect(prompt).toContain("\\n");
+    expect(prompt).toContain("SINGLE Logseq block");
+    expect(prompt).toContain("line breaks inside that same block");
     expect(prompt).toContain("((block-uuid))");
     expect(prompt).toContain("[[Page Name]]");
     expect(prompt).toContain("search_graph");
+    expect(prompt).toContain("Never output the literal characters backslash+n");
   });
 });

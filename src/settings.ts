@@ -6,6 +6,8 @@ const DEFAULTS = {
   apiBaseUrl: "http://localhost:1234/v1",
   apiKey: "",
   defaultModel: "",
+  historyBlocks: 20,
+  enableTools: true,
   mcpServers: "[]",
 };
 
@@ -13,6 +15,8 @@ export interface AppSettings {
   apiBaseUrl: string;
   apiKey: string;
   defaultModel: string;
+  historyBlocks: number;
+  enableTools: boolean;
   mcpServers: string;
 }
 
@@ -28,6 +32,11 @@ export function getSettings(): AppSettings {
         : DEFAULTS.apiBaseUrl,
     apiKey: typeof raw.apiKey === "string" ? raw.apiKey : "",
     defaultModel: typeof raw.defaultModel === "string" ? raw.defaultModel : "",
+    historyBlocks:
+      typeof raw.historyBlocks === "number" && raw.historyBlocks > 0
+        ? Math.floor(raw.historyBlocks)
+        : DEFAULTS.historyBlocks,
+    enableTools: typeof raw.enableTools === "boolean" ? raw.enableTools : DEFAULTS.enableTools,
     mcpServers:
       typeof raw.mcpServers === "string" ? raw.mcpServers : DEFAULTS.mcpServers,
   };
@@ -46,6 +55,15 @@ export function getDefaultModel(): string {
 export function onAvailableModels(cb: (models: string[]) => void): () => void {
   modelsListeners.add(cb);
   return () => modelsListeners.delete(cb);
+}
+
+const defaultModelListeners = new Set<(model: string) => void>();
+
+export function onDefaultModelChanged(
+  cb: (model: string) => void
+): () => void {
+  defaultModelListeners.add(cb);
+  return () => defaultModelListeners.delete(cb);
 }
 
 function registerSchema(): void {
@@ -83,6 +101,22 @@ function registerSchema(): void {
           : "Fill in API base URL above, then reload the plugin to load models",
       enumChoices: availableModels.length > 0 ? availableModels : [""],
       enumPicker: "select",
+    },
+    {
+      key: "historyBlocks",
+      type: "number",
+      default: DEFAULTS.historyBlocks,
+      title: "History blocks",
+      description:
+        "How many last blocks of the session are sent to the model as context. Lower it if your machine runs out of memory",
+    },
+    {
+      key: "enableTools",
+      type: "boolean",
+      default: DEFAULTS.enableTools,
+      title: "Enable tools (graph search & MCP)",
+      description:
+        "Turn off on weak hardware: tools make the request context much larger",
     },
     {
       key: "mcp-heading",
@@ -134,6 +168,7 @@ export function initSettings(): void {
 
   let prevBaseUrl = getSettings().apiBaseUrl;
   let prevApiKey = getSettings().apiKey;
+  let prevDefaultModel = getSettings().defaultModel;
   logseq.onSettingsChanged(() => {
     const settings = getSettings();
     if (
@@ -143,6 +178,11 @@ export function initSettings(): void {
       prevBaseUrl = settings.apiBaseUrl;
       prevApiKey = settings.apiKey;
       void refreshModels();
+    }
+    if (settings.defaultModel !== prevDefaultModel) {
+      prevDefaultModel = settings.defaultModel;
+      const model = getDefaultModel();
+      defaultModelListeners.forEach((cb) => cb(model));
     }
   });
 }

@@ -22,6 +22,7 @@ export interface ChatMessage {
 
 export interface ChatResult {
   content: string;
+  reasoning: string;
   toolCalls: ToolCall[];
 }
 
@@ -56,6 +57,27 @@ function authHeaders(apiKey: string): Record<string, string> {
   return headers;
 }
 
+function extractErrorMessage(status: number, text: string): string {
+  try {
+    const parsed = JSON.parse(text) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    const apiMessage =
+      typeof parsed.error === "object"
+        ? parsed.error?.message
+        : typeof parsed.error === "string"
+          ? parsed.error
+          : parsed.message;
+    if (typeof apiMessage === "string" && apiMessage.length > 0) {
+      return apiMessage;
+    }
+  } catch {
+    return `HTTP ${status} ${text.slice(0, 200)}`;
+  }
+  return `HTTP ${status} ${text.slice(0, 200)}`;
+}
+
 export async function listModels(
   baseUrl: string,
   apiKey: string,
@@ -75,9 +97,72 @@ export async function listModels(
     .filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
 }
 
-export function createStreamAccumulator(onDelta: (text: string) => void) {
+export function stripThinkTags(text: string): string {
+  let out = text.replace(/<think>[\s\S]*?<\/think>/g, "");
+  const openIdx = out.indexOf("<think>");
+  if (openIdx !== -1) out = out.slice(0, openIdx);
+  return out.trim();
+}
+
+const THINK_OPEN = "<think>";
+const THINK_CLOSE = "</think>";
+
+export function createStreamAccumulator(
+  onDelta: (text: string) => void,
+  onReasoning?: (text: string) => void
+) {
   let content = "";
+  let reasoning = "";
+  let inThink = false;
+  let pending = "";
   const toolCalls = new Map<number, ToolCall>();
+
+  const emitVisible = (text: string): void => {
+    if (!text) return;
+    content += text;
+    onDelta(content);
+  };
+
+  const step = (): boolean => {
+    if (inThink) {
+      const closeIdx = pending.indexOf(THINK_CLOSE);
+      if (closeIdx !== -1) {
+        const chunk = pending.slice(0, closeIdx);
+        pending = pending.slice(closeIdx + THINK_CLOSE.length);
+        inThink = false;
+        if (chunk) {
+          reasoning += chunk;
+          onReasoning?.(reasoning);
+        }
+        return true;
+      }
+      const hold = THINK_CLOSE.length - 1;
+      if (pending.length > hold) {
+        const chunk = pending.slice(0, pending.length - hold);
+        pending = pending.slice(pending.length - hold);
+        reasoning += chunk;
+        onReasoning?.(reasoning);
+      }
+      return false;
+    }
+    const openIdx = pending.indexOf(THINK_OPEN);
+    if (openIdx !== -1) {
+      emitVisible(pending.slice(0, openIdx));
+      pending = pending.slice(openIdx + THINK_OPEN.length);
+      inThink = true;
+      return true;
+    }
+    const ltIdx = pending.lastIndexOf("<");
+    if (ltIdx === -1) {
+      emitVisible(pending);
+      pending = "";
+      return false;
+    }
+    const safe = pending.slice(0, ltIdx);
+    pending = pending.slice(ltIdx);
+    emitVisible(safe);
+    return false;
+  };
 
   return {
     processLine(line: string): void {
@@ -86,7 +171,14 @@ export function createStreamAccumulator(onDelta: (text: string) => void) {
       const payload = trimmed.slice(5).trim();
       if (!payload || payload === "[DONE]") return;
       let chunk: {
-        choices?: Array<{ delta?: { content?: unknown; tool_calls?: unknown } }>;
+        choices?: Array<{
+          delta?: {
+            content?: unknown;
+            reasoning?: unknown;
+            reasoning_content?: unknown;
+            tool_calls?: unknown;
+          };
+        }>;
       };
       try {
         chunk = JSON.parse(payload);
@@ -94,9 +186,19 @@ export function createStreamAccumulator(onDelta: (text: string) => void) {
         return;
       }
       const delta = chunk.choices?.[0]?.delta ?? {};
+      const reasoningDelta =
+        typeof delta.reasoning_content === "string"
+          ? delta.reasoning_content
+          : typeof delta.reasoning === "string"
+            ? delta.reasoning
+            : "";
+      if (reasoningDelta.length > 0) {
+        reasoning += reasoningDelta;
+        onReasoning?.(reasoning);
+      }
       if (typeof delta.content === "string" && delta.content.length > 0) {
-        content += delta.content;
-        onDelta(content);
+        pending += delta.content;
+        while (step()) {}
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const part of delta.tool_calls as Array<{
@@ -120,8 +222,18 @@ export function createStreamAccumulator(onDelta: (text: string) => void) {
       }
     },
     result(): ChatResult {
+      if (pending) {
+        if (inThink) {
+          reasoning += pending;
+          onReasoning?.(reasoning);
+        } else {
+          emitVisible(pending);
+        }
+        pending = "";
+      }
       return {
-        content,
+        content: content.trim(),
+        reasoning: reasoning.trim(),
         toolCalls: [...toolCalls.values()].filter(
           (call) => call.function.name.length > 0
         ),
@@ -138,6 +250,7 @@ export interface ChatCompletionOptions {
   tools?: ToolSpec[];
   signal?: AbortSignal;
   onDelta?: (accumulated: string) => void;
+  onReasoning?: (accumulated: string) => void;
 }
 
 export async function chatCompletion(
@@ -156,14 +269,14 @@ export async function chatCompletion(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new LlmError(
-      res.status,
-      `LLM request failed: HTTP ${res.status} ${text.slice(0, 200)}`
-    );
+    throw new LlmError(res.status, `LLM request failed: ${extractErrorMessage(res.status, text)}`);
   }
   if (!res.body) throw new LlmError(0, "LLM response has no body");
 
-  const acc = createStreamAccumulator(opts.onDelta ?? (() => {}));
+  const acc = createStreamAccumulator(
+    opts.onDelta ?? (() => {}),
+    opts.onReasoning
+  );
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -193,6 +306,7 @@ export interface ToolLoopOptions {
 export interface ToolLoopResult {
   messages: ChatMessage[];
   content: string;
+  reasoning: string;
   toolCalls: ToolCall[];
   iterations: number;
 }
@@ -202,7 +316,7 @@ export async function runToolLoop(
 ): Promise<ToolLoopResult> {
   const messages = [...opts.messages];
   const maxIterations = opts.maxIterations ?? 5;
-  let result: ChatResult = { content: "", toolCalls: [] };
+  let result: ChatResult = { content: "", reasoning: "", toolCalls: [] };
   let iterations = 0;
 
   while (iterations < maxIterations) {
@@ -233,6 +347,7 @@ export async function runToolLoop(
   return {
     messages,
     content: result.content,
+    reasoning: result.reasoning,
     toolCalls: result.toolCalls,
     iterations,
   };

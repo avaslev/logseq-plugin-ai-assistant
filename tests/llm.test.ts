@@ -7,8 +7,21 @@ import {
   LlmError,
   pickModel,
   runToolLoop,
+  stripThinkTags,
   type ChatMessage,
 } from "../src/llm";
+
+describe("stripThinkTags", () => {
+  it("removes paired think tags", () => {
+    expect(stripThinkTags("<think>a\nb</think>Answer")).toBe("Answer");
+  });
+  it("removes unclosed think section", () => {
+    expect(stripThinkTags("Prefix <think>unfinished")).toBe("Prefix");
+  });
+  it("keeps clean text", () => {
+    expect(stripThinkTags("plain")).toBe("plain");
+  });
+});
 
 let server: Server;
 let port: number;
@@ -88,6 +101,76 @@ describe("createStreamAccumulator", () => {
     expect(result.content).toBe("Hello");
     expect(deltas).toEqual(["Hel", "Hello"]);
     expect(result.toolCalls).toEqual([]);
+  });
+
+  it("accumulates reasoning_content separately from content", () => {
+    const reasoningDeltas: string[] = [];
+    const acc = createStreamAccumulator(
+      () => {},
+      (text) => reasoningDeltas.push(text)
+    );
+    acc.processLine(
+      sseEvent({ choices: [{ delta: { reasoning_content: "let me think" } }] })
+    );
+    acc.processLine(
+      sseEvent({ choices: [{ delta: { content: "The answer" } }] })
+    );
+    const result = acc.result();
+    expect(result.reasoning).toBe("let me think");
+    expect(result.content).toBe("The answer");
+    expect(reasoningDeltas).toEqual(["let me think"]);
+  });
+
+  it("strips <think> tags from content and treats them as reasoning", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(
+      sseEvent({
+        choices: [
+          { delta: { content: "<think>hmm</think>The visible answer" } },
+        ],
+      })
+    );
+    const result = acc.result();
+    expect(result.content).toBe("The visible answer");
+    expect(result.reasoning).toBe("hmm");
+  });
+
+  it("handles <think> tags split across chunks", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "<thi" } }] }));
+    acc.processLine(
+      sseEvent({ choices: [{ delta: { content: "nk>deep</think>OK" } }] })
+    );
+    const result = acc.result();
+    expect(result.content).toBe("OK");
+    expect(result.reasoning).toBe("deep");
+  });
+
+  it("treats unclosed <think> as reasoning at stream end", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(sseEvent({ choices: [{ delta: { content: "<think>cut" } }] }));
+    const result = acc.result();
+    expect(result.content).toBe("");
+    expect(result.reasoning).toBe("cut");
+  });
+
+  it("streams reasoning incrementally while inside <think>", () => {
+    const reasoningDeltas: string[] = [];
+    const acc = createStreamAccumulator(
+      () => {},
+      (text) => reasoningDeltas.push(text)
+    );
+    acc.processLine(
+      sseEvent({ choices: [{ delta: { content: "<think>step one and " } }] })
+    );
+    expect(reasoningDeltas.length).toBe(1);
+    acc.processLine(
+      sseEvent({ choices: [{ delta: { content: "step two </think>Done" } }] })
+    );
+    const result = acc.result();
+    expect(result.reasoning).toBe("step one and step two");
+    expect(result.content).toBe("Done");
+    expect(reasoningDeltas.length).toBeGreaterThan(1);
   });
 
   it("merges split tool_calls by index", () => {

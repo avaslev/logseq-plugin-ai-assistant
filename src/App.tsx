@@ -16,6 +16,7 @@ import {
   getAvailableModels,
   getDefaultModel,
   onAvailableModels,
+  onDefaultModelChanged,
 } from "./settings";
 
 type SidebarRect = { left: number; width: number };
@@ -35,13 +36,47 @@ const THEME_VARS = [
   "--ls-secondary-border-color",
 ];
 
+function isDarkRgb(r: number, g: number, b: number): boolean {
+  return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+}
+
+function isDarkColor(color: string): boolean {
+  const rgbMatch = color.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+  if (rgbMatch) {
+    return isDarkRgb(Number(rgbMatch[1]), Number(rgbMatch[2]), Number(rgbMatch[3]));
+  }
+  const hex = color.replace(/^#/, "");
+  if (hex.length === 3 || hex.length === 6) {
+    const full =
+      hex.length === 3
+        ? hex
+            .split("")
+            .map((c) => c + c)
+            .join("")
+        : hex.slice(0, 6);
+    const r = parseInt(full.slice(0, 2), 16);
+    const g = parseInt(full.slice(2, 4), 16);
+    const b = parseInt(full.slice(4, 6), 16);
+    if ([r, g, b].some((v) => Number.isNaN(v))) return false;
+    return isDarkRgb(r, g, b);
+  }
+  return false;
+}
+
 function syncThemeVars(doc: Document) {
   const styles = getComputedStyle(doc.documentElement);
   const root = document.documentElement;
+  let primaryBackground = "";
   for (const name of THEME_VARS) {
     const value = styles.getPropertyValue(name).trim();
-    if (value) root.style.setProperty(name, value);
+    if (!value) continue;
+    if (name === "--ls-primary-background-color") primaryBackground = value;
+    root.style.setProperty(name, value);
   }
+  const dark =
+    doc.documentElement.getAttribute("data-theme") === "dark" ||
+    isDarkColor(primaryBackground);
+  root.style.colorScheme = dark ? "dark" : "light";
 }
 
 type Geometry = { left: number; width: number; parentHeight: number };
@@ -228,6 +263,17 @@ function App() {
   );
 
   useEffect(() => onAvailableModels(setModels), []);
+
+  const sessionPageRef = useRef<string | null>(null);
+  sessionPageRef.current = sessionPage;
+
+  useEffect(
+    () =>
+      onDefaultModelChanged((model) => {
+        if (!sessionPageRef.current) setSelectedModel(model);
+      }),
+    []
+  );
 
   const lastSyncedSessionRef = useRef<string | null>(null);
 
@@ -419,7 +465,7 @@ function App() {
           {sessionPage ?? `${SESSION_NAMESPACE}/…`}
         </span>
         <select
-          className="max-w-[160px] shrink-0 bg-transparent text-[10px] outline-none"
+          className="ai-assistant-model-select max-w-[160px] shrink-0 bg-transparent text-[10px] outline-none"
           style={{ color: "var(--ls-secondary-text-color)" }}
           value={selectedModel}
           onChange={(e) => setSelectedModel(e.target.value)}

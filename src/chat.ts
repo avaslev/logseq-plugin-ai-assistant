@@ -2,7 +2,10 @@ import "@logseq/libs";
 import {
   chatCompletion,
   runToolLoop,
+  stripThinkTags,
+  LlmError,
   type ChatMessage,
+  type ChatResult,
   type ToolCall,
 } from "./llm";
 import {
@@ -10,10 +13,9 @@ import {
   buildSystemPrompt,
   historyFromTree,
   sanitizeSessionSlug,
-  splitReplyIntoBlocks,
+  toSingleBlockContent,
   type HistoryNode,
-} from "./format";
-import { executeLogseqTool, getLogseqToolSpecs } from "./logseqTools";
+} from "./format";import { executeLogseqTool, getLogseqToolSpecs } from "./logseqTools";
 import {
   callMcpTool,
   getMcpToolSpecs,
@@ -27,7 +29,8 @@ export const SESSION_NAMESPACE = "ai_assistant";
 export const BAR_HEIGHT = 48;
 export const SIDEBAR_DEFAULT_WIDTH = 360;
 
-const MAX_HISTORY_BLOCKS = 30;
+const MAX_HISTORY_BLOCKS_FALLBACK = 30;
+const MAX_HISTORY_BLOCK_LENGTH = 500;
 const THINKING_UPDATE_INTERVAL_MS = 1000;
 
 function pad2(n: number): string {
@@ -145,21 +148,13 @@ export async function getSessionModel(
   }
 }
 
-interface BlockNode {
-  content?: unknown;
-  children?: unknown;
-}
-
-function blockChildren(node: BlockNode): BlockNode[] {
-  return Array.isArray(node.children) ? (node.children as BlockNode[]) : [];
-}
-
 async function buildSessionHistory(page: string): Promise<ChatMessage[]> {
   try {
+    const max = getSettings().historyBlocks || MAX_HISTORY_BLOCKS_FALLBACK;
     const tree = (await logseq.Editor.getPageBlocksTree(
       page
-    )) as unknown as BlockNode[];
-    return historyFromTree(tree ?? [], MAX_HISTORY_BLOCKS);
+    )) as unknown as HistoryNode[];
+    return historyFromTree(tree ?? [], max);
   } catch {
     return [];
   }
@@ -248,46 +243,64 @@ export async function sendMessage(
     { role: "system", content: buildSystemPrompt() },
     ...history,
   ];
-  const tools = [
-    ...getLogseqToolSpecs(),
-    ...(await getMcpToolSpecs(parseMcpServers(settings.mcpServers))),
-  ];
+  const tools = settings.enableTools
+    ? [
+        ...getLogseqToolSpecs(),
+        ...(await getMcpToolSpecs(parseMcpServers(settings.mcpServers))),
+      ]
+    : [];
 
   let lastUpdate = 0;
-  let accumulated = "";
-  const updateThinking = (): void => {
+  let contentAccum = "";
+  const updateAnswerBlock = (): void => {
     if (!thinkingBlock) return;
     const now = Date.now();
     if (now - lastUpdate < THINKING_UPDATE_INTERVAL_MS) return;
     lastUpdate = now;
-    void logseq.Editor.updateBlock(
-      thinkingBlock.uuid,
-      accumulated || THINKING_TEXT
-    );
+    const normalized = toSingleBlockContent(contentAccum);
+    if (!normalized) return;
+    void logseq.Editor.updateBlock(thinkingBlock.uuid, normalized);
+  };
+
+  const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
+    const attempt = (): Promise<ChatResult> =>
+      chatCompletion({
+        baseUrl: settings.apiBaseUrl,
+        apiKey: settings.apiKey,
+        model,
+        messages: msgs,
+        tools,
+        signal,
+        onDelta: (text) => {
+          contentAccum = text;
+          updateAnswerBlock();
+        },
+      });
+    try {
+      return await attempt();
+    } catch (err) {
+      const transient =
+        err instanceof LlmError
+          ? err.status === 0 || err.status >= 500
+          : !(err instanceof Error && err.name === "AbortError") && !signal.aborted;
+      if (!transient || signal.aborted) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return await attempt();
+    }
   };
 
   try {
     const loop = await runToolLoop({
       messages,
       tools,
-      send: (msgs) =>
-        chatCompletion({
-          baseUrl: settings.apiBaseUrl,
-          apiKey: settings.apiKey,
-          model,
-          messages: msgs,
-          tools,
-          signal,
-          onDelta: (text) => {
-            accumulated = text;
-            updateThinking();
-          },
-        }),
+      send: sendWithRetry,
       execTool: routeTool,
     });
 
-    const blocks = splitReplyIntoBlocks(loop.content);
-    if (blocks.length === 0) {
+    const replyText =
+      toSingleBlockContent(stripThinkTags(loop.content)) ||
+      loop.reasoning.trim();
+    if (!replyText) {
       if (thinkingBlock) {
         await logseq.Editor.updateBlock(thinkingBlock.uuid, "(empty reply)");
       }
@@ -295,16 +308,7 @@ export async function sendMessage(
     }
 
     if (thinkingBlock) {
-      await logseq.Editor.updateBlock(thinkingBlock.uuid, blocks[0].content);
-      const childTexts = [
-        ...blocks[0].children,
-        ...blocks.slice(1).flatMap((block) => [block.content, ...block.children]),
-      ];
-      for (const child of childTexts) {
-        await logseq.Editor.insertBlock(thinkingBlock.uuid, child, {
-          sibling: false,
-        });
-      }
+      await logseq.Editor.updateBlock(thinkingBlock.uuid, replyText);
     }
     scrollChatIntoView();
   } catch (err) {

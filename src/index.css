@@ -21,3 +21,8 @@ body {
   border-color: var(--ls-primary-accent-color);
 }
 
+.ai-assistant-model-select option {
+  background-color: var(--ls-secondary-background-color);
+  color: var(--ls-primary-text-color);
+}
+
