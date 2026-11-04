@@ -1,15 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  cancelGeneration,
   sendMessage,
+  getSessionModel,
   applyFallbackGeometry,
   applyFormGeometry,
   BAR_HEIGHT,
-  MODEL_NAME,
   SESSION_NAMESPACE,
   SIDEBAR_DEFAULT_WIDTH,
   detectOpenSessionPage,
   syncCurrentSession,
 } from "./chat";
+import { pickModel } from "./llm";
+import {
+  getAvailableModels,
+  getDefaultModel,
+  onAvailableModels,
+} from "./settings";
 
 type SidebarRect = { left: number; width: number };
 
@@ -23,6 +30,7 @@ const THEME_VARS = [
   "--ls-secondary-text-color",
   "--ls-primary-accent-color",
   "--ls-primary-accent-text-color",
+  "--ls-error-color",
   "--ls-border-color",
   "--ls-secondary-border-color",
 ];
@@ -214,11 +222,32 @@ function App() {
   const [pending, setPending] = useState(false);
   const [hasInput, setHasInput] = useState(false);
   const [sessionPage, setSessionPage] = useState<string | null>(null);
+  const [models, setModels] = useState<string[]>(getAvailableModels());
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    getDefaultModel()
+  );
+
+  useEffect(() => onAvailableModels(setModels), []);
+
+  const lastSyncedSessionRef = useRef<string | null>(null);
+
+  const handleSessionChange = useCallback((page: string | null) => {
+    setSessionPage(page);
+    if (page === lastSyncedSessionRef.current) return;
+    lastSyncedSessionRef.current = page;
+    if (!page) return;
+    void getSessionModel(page).then((model) => {
+      setSelectedModel(
+        pickModel(model, getAvailableModels(), getDefaultModel())
+      );
+    });
+  }, []);
+
   const rect = useAssistantSidebar(
     (g) => {
       geometryRef.current = g;
     },
-    (page) => setSessionPage(page)
+    handleSessionChange
   );
 
   const autoResize = useCallback(() => {
@@ -271,7 +300,10 @@ function App() {
     setPending(true);
     setHasInput(false);
     field!.value = "";
-    await sendMessage(content);
+    await sendMessage(
+      content,
+      selectedModel || getDefaultModel()
+    );
     setPending(false);
     autoResize();
     field?.focus();
@@ -279,15 +311,28 @@ function App() {
 
   const canSend = !pending && hasInput;
 
-  const sendButtonStyle = canSend
+  const sendButtonStyle = pending
     ? {
         backgroundColor: "var(--ls-primary-accent-color)",
         color: "var(--ls-primary-accent-text-color)",
       }
-    : {
-        backgroundColor: "var(--ls-secondary-background-color)",
-        color: "var(--ls-secondary-text-color)",
-      };
+    : canSend
+      ? {
+          backgroundColor: "var(--ls-primary-accent-color)",
+          color: "var(--ls-primary-accent-text-color)",
+        }
+      : {
+          backgroundColor: "var(--ls-secondary-background-color)",
+          color: "var(--ls-secondary-text-color)",
+        };
+
+  const handleButtonClick = () => {
+    if (pending) {
+      cancelGeneration();
+      return;
+    }
+    void handleSend();
+  };
 
   return (
     <form
@@ -330,27 +375,40 @@ function App() {
           }}
         />
         <button
-          type="submit"
-          disabled={!canSend}
+          type="button"
+          disabled={!pending && !hasInput}
           onMouseDown={(e) => e.preventDefault()}
-          className="mb-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full hover:opacity-90"
+          onClick={handleButtonClick}
+          className="mb-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full hover:opacity-90 disabled:opacity-50"
           style={sendButtonStyle}
-          title="Send (Enter)"
+          title={pending ? "Stop generation" : "Send (Enter)"}
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="m5 12 7-7 7 7" />
-            <path d="M12 19V5" />
-          </svg>
+          {pending ? (
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <rect x="6" y="6" width="12" height="12" rx="1.5" />
+            </svg>
+          ) : (
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m5 12 7-7 7 7" />
+              <path d="M12 19V5" />
+            </svg>
+          )}
         </button>
       </div>
       <div
@@ -360,7 +418,24 @@ function App() {
         <span className="truncate text-[10px]">
           {sessionPage ?? `${SESSION_NAMESPACE}/…`}
         </span>
-        <span className="shrink-0 text-[10px]">{MODEL_NAME}</span>
+        <select
+          className="max-w-[160px] shrink-0 bg-transparent text-[10px] outline-none"
+          style={{ color: "var(--ls-secondary-text-color)" }}
+          value={selectedModel}
+          onChange={(e) => setSelectedModel(e.target.value)}
+          title="Model for this session"
+        >
+          {(models.length > 0
+            ? models
+            : selectedModel
+              ? [selectedModel]
+              : ["—"]
+          ).map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
       </div>
     </form>
   );

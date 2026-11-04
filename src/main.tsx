@@ -4,6 +4,7 @@ import React from "react";
 import * as ReactDOM from "react-dom/client";
 import App from "./App";
 import { openSessionsPage } from "./chat";
+import { initSettings } from "./settings";
 import "./index.css";
 
 import { logseq as PL } from "../package.json";
@@ -22,6 +23,8 @@ function main() {
       <App />
     </React.StrictMode>
   );
+
+  initSettings();
 
   function createModel() {
     return {
