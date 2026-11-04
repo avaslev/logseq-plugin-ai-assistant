@@ -30,7 +30,6 @@ export const BAR_HEIGHT = 48;
 export const SIDEBAR_DEFAULT_WIDTH = 360;
 
 const MAX_HISTORY_BLOCKS_FALLBACK = 30;
-const MAX_HISTORY_BLOCK_LENGTH = 500;
 const THINKING_UPDATE_INTERVAL_MS = 1000;
 
 function pad2(n: number): string {

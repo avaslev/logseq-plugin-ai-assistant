@@ -198,7 +198,8 @@ export function createStreamAccumulator(
       }
       if (typeof delta.content === "string" && delta.content.length > 0) {
         pending += delta.content;
-        while (step()) {}
+        let progressed = step();
+        while (progressed) progressed = step();
       }
       if (Array.isArray(delta.tool_calls)) {
         for (const part of delta.tool_calls as Array<{

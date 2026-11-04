@@ -5,6 +5,7 @@ let _visible = logseq.isMainUIVisible;
 
 function subscribeLogseqEvent<T extends LSPluginUserEvents>(
   eventName: T,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   handler: (...args: any) => void
 ) {
   logseq.on(eventName, handler);
