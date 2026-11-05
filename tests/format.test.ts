@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  ASSISTANT_MARKER,
   buildSystemPrompt,
   historyFromTree,
+  markAssistantContent,
   sanitizeSessionSlug,
   toSingleBlockContent,
 } from "../src/format";
@@ -62,6 +64,61 @@ describe("toSingleBlockContent", () => {
       toSingleBlockContent("# Cities\n- Berlin\n- Paris")
     ).toBe("Cities\n• Berlin\n• Paris");
   });
+
+  it("preserves nested list indentation", () => {
+    expect(toSingleBlockContent("- Parent\n  - Child\n    - Grandchild")).toBe(
+      "Parent\n  • Child\n    • Grandchild"
+    );
+  });
+
+  it("keeps fenced code blocks intact", () => {
+    const reply = [
+      "Example:",
+      "",
+      "```yaml",
+      "- name: foo",
+      "  value: 1",
+      "",
+      "# comment",
+      "```",
+      "Done",
+    ].join("\n");
+    expect(toSingleBlockContent(reply)).toBe(
+      [
+        "Example:",
+        "```yaml",
+        "- name: foo",
+        "  value: 1",
+        "",
+        "# comment",
+        "```",
+        "Done",
+      ].join("\n")
+    );
+  });
+
+  it("does not treat think fragments inside code as service lines", () => {
+    const reply = ["```", "</think>", "/think", "```"].join("\n");
+    expect(toSingleBlockContent(reply)).toBe(reply);
+  });
+
+  it("supports tilde fences", () => {
+    const reply = ["~~~sh", "- not a bullet", "~~~"].join("\n");
+    expect(toSingleBlockContent(reply)).toBe(reply);
+  });
+});
+
+describe("markAssistantContent", () => {
+  it("prefixes replies with the assistant marker", () => {
+    expect(markAssistantContent("hello")).toBe(`${ASSISTANT_MARKER}hello`);
+    expect(markAssistantContent("")).toBe("");
+  });
+
+  it("does not duplicate the marker", () => {
+    expect(markAssistantContent(`${ASSISTANT_MARKER}hello`)).toBe(
+      `${ASSISTANT_MARKER}hello`
+    );
+  });
 });
 
 describe("historyFromTree", () => {
@@ -69,14 +126,14 @@ describe("historyFromTree", () => {
     { content: "AI Session" },
     { content: "hello" },
     {
-      content: "greetings",
+      content: `${ASSISTANT_MARKER}greetings`,
       children: [{ content: "- extra detail" }],
     },
     { content: "how are you" },
-    { content: "fine" },
+    { content: `${ASSISTANT_MARKER}fine` },
   ];
 
-  it("skips meta block and alternates user/assistant by position", () => {
+  it("skips meta block and detects roles by the assistant marker", () => {
     const result = historyFromTree(tree);
     expect(result).toEqual([
       { role: "user", content: "hello" },
@@ -86,9 +143,50 @@ describe("historyFromTree", () => {
     ]);
   });
 
+  it("treats unmarked blocks as user messages", () => {
+    const result = historyFromTree([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: "q" },
+      { content: "legacy answer" },
+    ]);
+    expect(result).toEqual([
+      { role: "user", content: "q" },
+      { role: "user", content: "legacy answer" },
+    ]);
+  });
+
+  it("keeps roles stable when a block is removed", () => {
+    const result = historyFromTree([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: "q1" },
+      { content: `${ASSISTANT_MARKER}a1` },
+      { content: `${ASSISTANT_MARKER}a2` },
+      { content: "q3" },
+      { content: `${ASSISTANT_MARKER}a3` },
+    ]);
+    expect(result).toEqual([
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "a1" },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "q3" },
+      { role: "assistant", content: "a3" },
+    ]);
+  });
+
+  it("does not drop the first message when the meta block is missing", () => {
+    const result = historyFromTree([
+      { content: "first question" },
+      { content: `${ASSISTANT_MARKER}first answer` },
+    ]);
+    expect(result).toEqual([
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "first answer" },
+    ]);
+  });
+
   it("limits history to the last N messages", () => {
     const longTree = Array.from({ length: 51 }, (_, i) => ({
-      content: `msg ${i}`,
+      content: i % 2 === 1 ? `${ASSISTANT_MARKER}msg ${i}` : `msg ${i}`,
     }));
     const result = historyFromTree(longTree, 10);
     expect(result).toHaveLength(10);
@@ -98,11 +196,11 @@ describe("historyFromTree", () => {
 
   it("skips empty and thinking placeholders", () => {
     const result = historyFromTree([
-      { content: "meta" },
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
       { content: "q" },
       { content: "💭 Думаю…" },
       { content: "  " },
-      { content: "answer" },
+      { content: `${ASSISTANT_MARKER}answer` },
     ]);
     expect(result).toEqual([
       { role: "user", content: "q" },
@@ -112,7 +210,7 @@ describe("historyFromTree", () => {
 
   it("skips error and cancel placeholders", () => {
     const result = historyFromTree([
-      { content: "meta" },
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
       { content: "q1" },
       { content: "⚠️ LLM request failed: model runner stopped" },
       { content: "q2" },
@@ -120,7 +218,7 @@ describe("historyFromTree", () => {
       { content: "q3" },
       { content: "(empty reply)" },
       { content: "q4" },
-      { content: "final answer" },
+      { content: `${ASSISTANT_MARKER}final answer` },
     ]);
     expect(result).toEqual([
       { role: "user", content: "q1" },

@@ -1,3 +1,10 @@
+import {
+  fetchWithTimeout,
+  readResponseJson,
+  TimeoutError,
+  withTimeout,
+} from "./http";
+
 export interface ToolSpec {
   type: "function";
   function: {
@@ -41,9 +48,27 @@ export function pickModel(
   fallback: string
 ): string {
   if (requested && available.includes(requested)) return requested;
-  if (available.includes(fallback)) return fallback;
-  return available[0] ?? fallback ?? requested ?? "";
+  if (fallback && available.includes(fallback)) return fallback;
+  return available[0] || requested || fallback;
 }
+
+const NON_CHAT_MODEL =
+  /(embed|rerank|cross-encoder|moderation|whisper|tts|text-to-speech|speech|dall-e|stable-diffusion|imagen|flux)/i;
+
+export function filterChatModels(models: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const model of models) {
+    if (!model || NON_CHAT_MODEL.test(model) || seen.has(model)) continue;
+    seen.add(model);
+    result.push(model);
+  }
+  return result;
+}
+
+const MODELS_TIMEOUT_MS = 15_000;
+const LLM_CONNECT_TIMEOUT_MS = 30_000;
+const LLM_IDLE_TIMEOUT_MS = 60_000;
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
@@ -83,18 +108,28 @@ export async function listModels(
   apiKey: string,
   signal?: AbortSignal
 ): Promise<string[]> {
-  const res = await fetch(joinUrl(baseUrl, "models"), {
-    headers: authHeaders(apiKey),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      joinUrl(baseUrl, "models"),
+      { headers: authHeaders(apiKey), signal },
+      { signal, timeoutMs: MODELS_TIMEOUT_MS }
+    );
+  } catch (err) {
+    if (err instanceof TimeoutError) throw new LlmError(0, err.message);
+    throw err;
+  }
   if (!res.ok) {
     throw new LlmError(res.status, `Failed to list models: HTTP ${res.status}`);
   }
-  const data = await res.json();
+  const data = await readResponseJson<{ data?: Array<{ id?: unknown }> }>(
+    res,
+    MODELS_TIMEOUT_MS
+  );
   const items = Array.isArray(data?.data) ? data.data : [];
   return items
-    .map((item: { id?: unknown }) => item.id)
-    .filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
+    .map((item) => item.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
 }
 
 export function stripThinkTags(text: string): string {
@@ -253,6 +288,8 @@ export interface ChatCompletionOptions {
   messages: ChatMessage[];
   tools?: ToolSpec[];
   signal?: AbortSignal;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
   onDelta?: (accumulated: string) => void;
   onReasoning?: (accumulated: string) => void;
 }
@@ -260,17 +297,30 @@ export interface ChatCompletionOptions {
 export async function chatCompletion(
   opts: ChatCompletionOptions
 ): Promise<ChatResult> {
-  const res = await fetch(joinUrl(opts.baseUrl, "chat/completions"), {
-    method: "POST",
-    headers: authHeaders(opts.apiKey),
-    body: JSON.stringify({
-      model: opts.model,
-      messages: opts.messages,
-      tools: opts.tools && opts.tools.length > 0 ? opts.tools : undefined,
-      stream: true,
-    }),
-    signal: opts.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      joinUrl(opts.baseUrl, "chat/completions"),
+      {
+        method: "POST",
+        headers: authHeaders(opts.apiKey),
+        body: JSON.stringify({
+          model: opts.model,
+          messages: opts.messages,
+          tools: opts.tools && opts.tools.length > 0 ? opts.tools : undefined,
+          stream: true,
+        }),
+        signal: opts.signal,
+      },
+      {
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs ?? LLM_CONNECT_TIMEOUT_MS,
+      }
+    );
+  } catch (err) {
+    if (err instanceof TimeoutError) throw new LlmError(0, err.message);
+    throw err;
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new LlmError(res.status, `LLM request failed: ${extractErrorMessage(res.status, text)}`);
@@ -283,9 +333,22 @@ export async function chatCompletion(
   );
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  const idleTimeoutMs = opts.idleTimeoutMs ?? LLM_IDLE_TIMEOUT_MS;
   let buffer = "";
   for (;;) {
-    const { done, value } = await reader.read();
+    let read: ReadableStreamReadResult<Uint8Array>;
+    try {
+      read = await withTimeout(
+        reader.read(),
+        idleTimeoutMs,
+        "LLM stream timed out"
+      );
+    } catch (err) {
+      await reader.cancel().catch(() => {});
+      if (err instanceof TimeoutError) throw new LlmError(0, err.message);
+      throw err;
+    }
+    const { done, value } = read;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     let newlineIndex: number;
@@ -303,8 +366,9 @@ export interface ToolLoopOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
   send: (messages: ChatMessage[]) => Promise<ChatResult>;
-  execTool: (call: ToolCall) => Promise<string>;
+  execTool: (call: ToolCall, signal?: AbortSignal) => Promise<string>;
   maxIterations?: number;
+  signal?: AbortSignal;
 }
 
 export interface ToolLoopResult {
@@ -324,6 +388,7 @@ export async function runToolLoop(
   let iterations = 0;
 
   while (iterations < maxIterations) {
+    opts.signal?.throwIfAborted();
     result = await opts.send(messages);
     iterations += 1;
     if (result.toolCalls.length === 0) break;
@@ -334,12 +399,15 @@ export async function runToolLoop(
       tool_calls: result.toolCalls,
     });
     for (const call of result.toolCalls) {
+      opts.signal?.throwIfAborted();
       let output: string;
       try {
-        output = await opts.execTool(call);
+        output = await opts.execTool(call, opts.signal);
       } catch (err) {
+        opts.signal?.throwIfAborted();
         output = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
       }
+      opts.signal?.throwIfAborted();
       messages.push({
         role: "tool",
         tool_call_id: call.id,

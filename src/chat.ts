@@ -12,10 +12,16 @@ import {
   THINKING_TEXT,
   buildSystemPrompt,
   historyFromTree,
+  markAssistantContent,
   sanitizeSessionSlug,
   toSingleBlockContent,
   type HistoryNode,
-} from "./format";import { executeLogseqTool, getLogseqToolSpecs } from "./logseqTools";
+} from "./format";
+import {
+  executeLogseqTool,
+  getLogseqToolSpecs,
+  getWriteToolSpecs,
+} from "./logseqTools";
 import {
   callMcpTool,
   getMcpToolSpecs,
@@ -147,16 +153,60 @@ export async function getSessionModel(
   }
 }
 
-async function buildSessionHistory(page: string): Promise<ChatMessage[]> {
-  try {
-    const max = getSettings().historyBlocks || MAX_HISTORY_BLOCKS_FALLBACK;
-    const tree = (await logseq.Editor.getPageBlocksTree(
-      page
-    )) as unknown as HistoryNode[];
-    return historyFromTree(tree ?? [], max);
-  } catch {
-    return [];
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isSessionMetaContent(content: string): boolean {
+  return (
+    /^\s*AI Session\s*(?:\n|$)/i.test(content) ||
+    (/(^|\n)\s*model::/.test(content) &&
+      /(^|\n)\s*started::/.test(content))
+  );
+}
+
+function findSessionMetaBlock(
+  tree: HistoryNode[]
+): { uuid: string; content: string } | null {
+  for (const node of tree ?? []) {
+    const content = String(node.content ?? "").trim();
+    if (!content || !isSessionMetaContent(content)) continue;
+    const uuid = String(node.uuid ?? "");
+    if (uuid) return { uuid, content };
   }
+  return null;
+}
+
+export async function persistSessionModel(
+  page: string,
+  model: string,
+  tree?: HistoryNode[]
+): Promise<void> {
+  const nodes =
+    tree ??
+    ((await logseq.Editor.getPageBlocksTree(
+      page
+    )) as unknown as HistoryNode[]) ??
+    [];
+  const meta = findSessionMetaBlock(nodes);
+  if (!meta) return;
+  const stored = /(^|\n)\s*model::\s*(.*)/.exec(meta.content)?.[2]?.trim();
+  if (stored === model) return;
+  await logseq.Editor.upsertBlockProperty(meta.uuid, "model", model);
 }
 
 export function applyFallbackGeometry(): void {
@@ -186,16 +236,25 @@ export function applyFormGeometry(
   });
 }
 
-async function routeTool(call: ToolCall): Promise<string> {
+async function routeTool(
+  call: ToolCall,
+  signal?: AbortSignal
+): Promise<string> {
+  signal?.throwIfAborted();
   const route = mcpToolRoute(call.function.name);
   if (!route) {
-    return executeLogseqTool(call.function.name, call.function.arguments);
+    const result = await executeLogseqTool(
+      call.function.name,
+      call.function.arguments
+    );
+    signal?.throwIfAborted();
+    return result;
   }
   const server = parseMcpServers(getSettings().mcpServers).find(
     (item) => item.name === route.server
   );
   if (!server) return `Unknown MCP server: ${route.server}`;
-  return callMcpTool(server, route.tool, call.function.arguments);
+  return callMcpTool(server, route.tool, call.function.arguments, { signal });
 }
 
 function scrollChatIntoView(): void {
@@ -213,92 +272,138 @@ export function cancelGeneration(): void {
   abortController?.abort();
 }
 
+export function cleanupAssistantUi(): void {
+  try {
+    window.parent.document.body.classList.remove("ai-assistant-bar-shown");
+  } catch {
+    console.warn("[ai-assistant] unable to clear parent UI flag");
+  }
+  try {
+    const frame = window.frameElement as HTMLIFrameElement | null;
+    if (frame) {
+      frame.style.transition = "";
+      frame.style.transform = "";
+    }
+  } catch {
+    console.warn("[ai-assistant] unable to reset frame styles");
+  }
+}
+
 export async function sendMessage(
   content: string,
   model: string
 ): Promise<void> {
-  let page = currentSessionPage;
-  if (!page) {
-    page = await createSessionFromMessage(content, model);
-    await openCurrentSessionInSidebar();
-  }
-
   abortController?.abort();
-  abortController = new AbortController();
-  const signal = abortController.signal;
-
-  await logseq.Editor.appendBlockInPage(page, content);
-  scrollChatIntoView();
-
-  const thinkingBlock = await logseq.Editor.appendBlockInPage(
-    page,
-    THINKING_TEXT
-  );
-  scrollChatIntoView();
-
-  const settings = getSettings();
-  const history = await buildSessionHistory(page);
-  const messages: ChatMessage[] = [
-    { role: "system", content: buildSystemPrompt() },
-    ...history,
-  ];
-  const tools = settings.enableTools
-    ? [
-        ...getLogseqToolSpecs(),
-        ...(await getMcpToolSpecs(parseMcpServers(settings.mcpServers))),
-      ]
-    : [];
-
-  let lastUpdate = 0;
-  let contentAccum = "";
-  const updateAnswerBlock = (): void => {
-    if (!thinkingBlock) return;
-    const now = Date.now();
-    if (now - lastUpdate < THINKING_UPDATE_INTERVAL_MS) return;
-    lastUpdate = now;
-    const normalized = toSingleBlockContent(contentAccum);
-    if (!normalized) return;
-    void logseq.Editor.updateBlock(thinkingBlock.uuid, normalized);
-  };
-
-  const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
-    const attempt = (): Promise<ChatResult> =>
-      chatCompletion({
-        baseUrl: settings.apiBaseUrl,
-        apiKey: settings.apiKey,
-        model,
-        messages: msgs,
-        tools,
-        signal,
-        onDelta: (text) => {
-          contentAccum = text;
-          updateAnswerBlock();
-        },
-      });
-    try {
-      return await attempt();
-    } catch (err) {
-      const transient =
-        err instanceof LlmError
-          ? err.status === 0 || err.status >= 500
-          : !(err instanceof Error && err.name === "AbortError") && !signal.aborted;
-      if (!transient || signal.aborted) throw err;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      return await attempt();
-    }
-  };
+  const controller = new AbortController();
+  abortController = controller;
+  const signal = controller.signal;
+  let thinkingBlock: { uuid: string } | null = null;
 
   try {
+    let page = currentSessionPage;
+    if (!page) {
+      page = await createSessionFromMessage(content, model);
+      signal.throwIfAborted();
+      await openCurrentSessionInSidebar();
+      signal.throwIfAborted();
+    }
+
+    await logseq.Editor.appendBlockInPage(page, content);
+    scrollChatIntoView();
+
+    thinkingBlock = await logseq.Editor.appendBlockInPage(page, THINKING_TEXT);
+    scrollChatIntoView();
+
+    const settings = getSettings();
+    let tree: HistoryNode[] = [];
+    try {
+      tree =
+        ((await logseq.Editor.getPageBlocksTree(
+          page
+        )) as unknown as HistoryNode[]) ?? [];
+    } catch {
+      tree = [];
+    }
+    const history = historyFromTree(
+      tree,
+      settings.historyBlocks || MAX_HISTORY_BLOCKS_FALLBACK
+    );
+    try {
+      await persistSessionModel(page, model, tree);
+    } catch (err) {
+      console.warn("[ai-assistant] failed to persist session model:", err);
+    }
+
+    const messages: ChatMessage[] = [
+      {
+        role: "system",
+        content: buildSystemPrompt(new Date(), settings.enableWriteTools),
+      },
+      ...history,
+    ];
+    const tools = settings.enableTools
+      ? [
+          ...getLogseqToolSpecs(),
+          ...(settings.enableWriteTools ? getWriteToolSpecs() : []),
+          ...(await getMcpToolSpecs(
+            parseMcpServers(settings.mcpServers),
+            { signal }
+          )),
+        ]
+      : [];
+
+    let lastUpdate = 0;
+    let contentAccum = "";
+    const updateAnswerBlock = (): void => {
+      if (!thinkingBlock) return;
+      const now = Date.now();
+      if (now - lastUpdate < THINKING_UPDATE_INTERVAL_MS) return;
+      lastUpdate = now;
+      const normalized = toSingleBlockContent(contentAccum);
+      if (!normalized) return;
+      void logseq.Editor.updateBlock(thinkingBlock.uuid, normalized);
+    };
+
+    const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
+      const attempt = (): Promise<ChatResult> =>
+        chatCompletion({
+          baseUrl: settings.apiBaseUrl,
+          apiKey: settings.apiKey,
+          model,
+          messages: msgs,
+          tools,
+          signal,
+          onDelta: (text) => {
+            contentAccum = text;
+            updateAnswerBlock();
+          },
+        });
+      try {
+        return await attempt();
+      } catch (err) {
+        const transient =
+          err instanceof LlmError
+            ? err.status === 0 || err.status >= 500
+            : !(err instanceof Error && err.name === "AbortError") &&
+              !signal.aborted;
+        if (!transient || signal.aborted) throw err;
+        await abortableDelay(1500, signal);
+        return await attempt();
+      }
+    };
+
     const loop = await runToolLoop({
       messages,
       tools,
       send: sendWithRetry,
       execTool: routeTool,
+      signal,
     });
 
-    const replyText =
+    const replyText = markAssistantContent(
       toSingleBlockContent(stripThinkTags(loop.content)) ||
-      loop.reasoning.trim();
+        loop.reasoning.trim()
+    );
     if (!replyText) {
       if (thinkingBlock) {
         await logseq.Editor.updateBlock(thinkingBlock.uuid, "(empty reply)");
@@ -323,6 +428,6 @@ export async function sendMessage(
       void logseq.UI.showMsg(`AI assistant: ${message}`, "error");
     }
   } finally {
-    if (abortController?.signal === signal) abortController = null;
+    if (abortController === controller) abortController = null;
   }
 }

@@ -1,6 +1,6 @@
 import "@logseq/libs";
 import type { SettingSchemaDesc } from "@logseq/libs/dist/LSPlugin";
-import { listModels } from "./llm";
+import { filterChatModels, listModels } from "./llm";
 import { resetMcpState } from "./mcp";
 
 const DEFAULTS = {
@@ -9,6 +9,7 @@ const DEFAULTS = {
   defaultModel: "",
   historyBlocks: 20,
   enableTools: true,
+  enableWriteTools: false,
   mcpServers: "[]",
 };
 
@@ -18,6 +19,7 @@ export interface AppSettings {
   defaultModel: string;
   historyBlocks: number;
   enableTools: boolean;
+  enableWriteTools: boolean;
   mcpServers: string;
 }
 
@@ -38,6 +40,10 @@ export function getSettings(): AppSettings {
         ? Math.floor(raw.historyBlocks)
         : DEFAULTS.historyBlocks,
     enableTools: typeof raw.enableTools === "boolean" ? raw.enableTools : DEFAULTS.enableTools,
+    enableWriteTools:
+      typeof raw.enableWriteTools === "boolean"
+        ? raw.enableWriteTools
+        : DEFAULTS.enableWriteTools,
     mcpServers:
       typeof raw.mcpServers === "string" ? raw.mcpServers : DEFAULTS.mcpServers,
   };
@@ -120,6 +126,14 @@ function registerSchema(): void {
         "Turn off on weak hardware: tools make the request context much larger",
     },
     {
+      key: "enableWriteTools",
+      type: "boolean",
+      default: DEFAULTS.enableWriteTools,
+      title: "Allow editing the open page",
+      description:
+        "Let the agent insert, update, remove and move blocks and set properties on the page you currently have open. Off by default",
+    },
+    {
       key: "mcp-heading",
       type: "heading",
       default: null,
@@ -143,13 +157,19 @@ export async function refreshModels(): Promise<void> {
   const { apiBaseUrl, apiKey } = getSettings();
   if (!apiBaseUrl) return;
   try {
-    availableModels = await listModels(apiBaseUrl, apiKey);
+    availableModels = filterChatModels(await listModels(apiBaseUrl, apiKey));
   } catch (err) {
     console.warn(
       "[ai-assistant] model list refresh failed:",
       err instanceof Error ? err.message : err
     );
     return;
+  }
+  if (availableModels.length === 0) {
+    console.warn(
+      "[ai-assistant] no chat-completion models found at",
+      apiBaseUrl
+    );
   }
   const { defaultModel } = getSettings();
   if (availableModels.length > 0 && !availableModels.includes(defaultModel)) {

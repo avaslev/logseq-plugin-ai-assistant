@@ -3,7 +3,7 @@ import "@logseq/libs";
 import React from "react";
 import * as ReactDOM from "react-dom/client";
 import App from "./App";
-import { openSessionsPage } from "./chat";
+import { cleanupAssistantUi, openSessionsPage } from "./chat";
 import { initSettings } from "./settings";
 import "./index.css";
 
@@ -25,6 +25,11 @@ function main() {
   );
 
   initSettings();
+
+  window.addEventListener("beforeunload", cleanupAssistantUi);
+  logseq.beforeunload(async () => {
+    cleanupAssistantUi();
+  });
 
   function createModel() {
     return {

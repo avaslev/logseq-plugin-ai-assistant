@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   chatCompletion,
   createStreamAccumulator,
+  filterChatModels,
   listModels,
   LlmError,
   pickModel,
@@ -55,6 +56,7 @@ function startServer(): Promise<void> {
         }
         if (req.url === "/v1/chat/completions") {
           receivedBodies.push(body);
+          if (body.model === "stall") return;
           const { status, body: out } = completionHandler(body);
           if (status !== 200) {
             res.statusCode = status;
@@ -86,6 +88,7 @@ beforeEach(async () => {
 
 afterAll(() => {
   server?.close();
+  server?.closeAllConnections?.();
 });
 
 describe("createStreamAccumulator", () => {
@@ -256,12 +259,51 @@ describe("pickModel", () => {
   it("uses first available when default is missing", () => {
     expect(pickModel(null, ["a", "b"], "zzz")).toBe("a");
   });
+  it("keeps requested model when the list is empty", () => {
+    expect(pickModel("custom", [], "")).toBe("custom");
+  });
+  it("returns fallback when everything else is empty", () => {
+    expect(pickModel(null, [], "local")).toBe("local");
+    expect(pickModel(null, [], "")).toBe("");
+  });
+});
+
+describe("filterChatModels", () => {
+  it("drops embedding and reranking models", () => {
+    expect(
+      filterChatModels([
+        "text-embedding-3-small",
+        "nomic-embed-text",
+        "bge-reranker-v2",
+        "gpt-4o-mini",
+        "llama-3.1-8b",
+      ])
+    ).toEqual(["gpt-4o-mini", "llama-3.1-8b"]);
+  });
+
+  it("deduplicates and keeps order", () => {
+    expect(filterChatModels(["b", "a", "b", ""])).toEqual(["b", "a"]);
+  });
 });
 
 describe("listModels", () => {
   it("returns model ids from the API", async () => {
     const models = await listModels(baseUrl(), "");
     expect(models).toEqual(["model-a", "model-b"]);
+  });
+});
+
+describe("chatCompletion timeouts", () => {
+  it("rejects when the server does not respond", async () => {
+    await expect(
+      chatCompletion({
+        baseUrl: baseUrl(),
+        apiKey: "",
+        model: "stall",
+        messages: [{ role: "user", content: "hi" }],
+        timeoutMs: 50,
+      })
+    ).rejects.toBeInstanceOf(LlmError);
   });
 });
 

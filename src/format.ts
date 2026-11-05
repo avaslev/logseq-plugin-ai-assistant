@@ -4,6 +4,7 @@ export const THINKING_TEXT = "💭 Думаю…";
 export const MAX_SLUG_LENGTH = 40;
 
 export interface HistoryNode {
+  uuid?: unknown;
   content?: unknown;
   children?: unknown;
 }
@@ -18,22 +19,77 @@ export function sanitizeSessionSlug(text: string): string {
 }
 
 const THINK_FRAGMENT_LINE = /^\s*(<\/?think>?|\/think)\s*$/i;
+const FENCE_START = /^\s*(`{3,}|~{3,})/;
+const FENCE_END = /^\s*(`{3,}|~{3,})\s*$/;
+
+export const ASSISTANT_MARKER = "✦ ";
+
+export function isAssistantContent(text: string): boolean {
+  return /^\s*✦\s/.test(text);
+}
+
+export function markAssistantContent(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  return isAssistantContent(trimmed)
+    ? trimmed
+    : `${ASSISTANT_MARKER}${trimmed}`;
+}
+
+export function stripAssistantMarker(text: string): string {
+  return text.replace(/^\s*✦\s+/, "");
+}
 
 export function toSingleBlockContent(reply: string): string {
-  const lines = reply
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line && !THINK_FRAGMENT_LINE.test(line))
-    .map((line) => {
-      if (/^[-*+]\s+/.test(line)) return line.replace(/^[-*+]\s+/, "• ");
-      if (/^#{1,6}\s+/.test(line)) return line.replace(/^#{1,6}\s+/, "");
-      return line;
-    });
+  const lines: string[] = [];
+  let fence: { char: string; length: number } | null = null;
+
+  for (const raw of reply.split("\n")) {
+    if (fence) {
+      lines.push(raw);
+      const end = raw.match(FENCE_END);
+      if (
+        end &&
+        end[1][0] === fence.char &&
+        end[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+
+    const start = raw.match(FENCE_START);
+    if (start) {
+      fence = { char: start[1][0], length: start[1].length };
+      lines.push(raw.trimEnd());
+      continue;
+    }
+
+    const line = raw.trim();
+    if (!line || THINK_FRAGMENT_LINE.test(line)) continue;
+
+    const list = line.match(/^[-*+]\s+(.*)$/);
+    if (list) {
+      const indent = raw.slice(0, raw.length - raw.trimStart().length);
+      lines.push(`${indent}• ${list[1]}`);
+      continue;
+    }
+
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) {
+      lines.push(heading[1]);
+      continue;
+    }
+
+    lines.push(line);
+  }
+
   if (lines.length === 0) return "";
-  lines[0] = lines[0].replace(/^[•*-]\s+/, "").trim();
+  lines[0] = lines[0].replace(/^\s*[•*-]\s+/, "").trim();
   if (!lines[0]) lines.shift();
   return lines.join("\n");
 }
+
 
 const HISTORY_NODE_MAX_LENGTH = 500;
 const SERVICE_BLOCK_PREFIXES = ["⚠️", "⏹"];
@@ -46,34 +102,41 @@ function isServiceBlock(content: string): boolean {
   );
 }
 
+function isSessionMeta(content: string): boolean {
+  if (/^\s*AI Session\s*(?:\n|$)/i.test(content)) return true;
+  return /(^|\n)\s*model::/.test(content) &&
+    /(^|\n)\s*started::/.test(content);
+}
+
 export function historyFromTree(tree: HistoryNode[], max = 30): ChatMessage[] {
   const messages: ChatMessage[] = [];
-  for (let i = 1; i < tree.length; i++) {
-    const node = tree[i];
-    const content = String(node.content ?? "")
+  for (const node of tree ?? []) {
+    const raw = String(node.content ?? "").trim();
+    if (!raw || isServiceBlock(raw) || isSessionMeta(raw)) continue;
+    const assistant = isAssistantContent(raw);
+    const content = stripAssistantMarker(raw)
       .trim()
       .slice(0, HISTORY_NODE_MAX_LENGTH);
-    if (!content || isServiceBlock(content)) continue;
-    const role = i % 2 === 1 ? "user" : "assistant";
+    if (!content) continue;
     const childTexts = (Array.isArray(node.children)
       ? (node.children as HistoryNode[])
       : []
     )
-      .map((child) =>
-        String(child.content ?? "")
-          .trim()
-          .slice(0, HISTORY_NODE_MAX_LENGTH)
-      )
-      .filter((text) => text.length > 0);
+      .map((child) => stripAssistantMarker(String(child.content ?? "").trim()))
+      .filter((text) => text.length > 0)
+      .map((text) => text.slice(0, HISTORY_NODE_MAX_LENGTH));
     const full = childTexts.length
       ? [content, ...childTexts].join("\n")
       : content;
-    messages.push({ role, content: full });
+    messages.push({ role: assistant ? "assistant" : "user", content: full });
   }
   return messages.slice(-max);
 }
 
-export function buildSystemPrompt(date = new Date()): string {
+export function buildSystemPrompt(
+  date = new Date(),
+  enableWriteTools = false
+): string {
   return [
     "You are an AI assistant working inside Logseq, a networked note-taking app.",
     "Your answers are written into the user's graph as Logseq blocks.",
@@ -101,6 +164,18 @@ export function buildSystemPrompt(date = new Date()): string {
     "- Keep answers concise.",
     "- Answer directly: do not restate the user's question at the start of your answer.",
     "- Never output thinking tags like <think>, </think> or /think — they are handled automatically.",
+    ...(enableWriteTools
+      ? [
+          "",
+          "Page editing rules:",
+          "- Write tools (insert_block, prepend_block, update_block, remove_block, move_block, upsert_block_property) only affect the page the user currently has open.",
+          "- Get block uuids from get_page_blocks, get_block or search_graph before editing; never guess uuids.",
+          "- Each tool call writes ONE block; to add several blocks, make several insert_block calls.",
+          "- Newlines inside the content parameter are line breaks within that same block, not new blocks.",
+          "- For destructive actions (remove_block, move_block) describe what you are about to change and confirm with the user first if the request is ambiguous.",
+          "- After editing, briefly report what changed; do not paste whole edited blocks back unless asked.",
+        ]
+      : []),
     "",
     `Today's date: ${date.toISOString().slice(0, 10)}.`,
   ].join("\n");

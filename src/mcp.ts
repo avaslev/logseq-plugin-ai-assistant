@@ -1,10 +1,22 @@
 import type { ToolSpec } from "./llm";
+import {
+  fetchWithTimeout,
+  readResponseJson,
+  readResponseText,
+} from "./http";
 
 export interface McpServerConfig {
   name: string;
   url: string;
   headers?: Record<string, string>;
 }
+
+export interface McpCallOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+const MCP_TIMEOUT_MS = 30_000;
 
 export function parseMcpServers(json: string): McpServerConfig[] {
   let parsed: unknown;
@@ -38,8 +50,10 @@ const initialized = new Set<string>();
 async function rpc(
   server: McpServerConfig,
   method: string,
-  params?: unknown
+  params?: unknown,
+  opts: McpCallOptions = {}
 ): Promise<{ result?: unknown; error?: { message?: string } }> {
+  const timeoutMs = opts.timeoutMs ?? MCP_TIMEOUT_MS;
   rpcId += 1;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -49,11 +63,16 @@ async function rpc(
   const sessionId = sessionIds.get(server.name);
   if (sessionId) headers["mcp-session-id"] = sessionId;
 
-  const res = await fetch(server.url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
-  });
+  const res = await fetchWithTimeout(
+    server.url,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: rpcId, method, params }),
+      signal: opts.signal,
+    },
+    { signal: opts.signal, timeoutMs }
+  );
 
   if (res.status === 404 && sessionId) {
     sessionIds.delete(server.name);
@@ -66,7 +85,7 @@ async function rpc(
 
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    const text = await res.text();
+    const text = await readResponseText(res, timeoutMs);
     const dataLine =
       text
         .split("\n")
@@ -74,30 +93,41 @@ async function rpc(
         .pop() ?? "";
     return JSON.parse(dataLine.replace(/^data:\s*/, ""));
   }
-  return await res.json();
+  return await readResponseJson(res, timeoutMs);
 }
 
-async function ensureInit(server: McpServerConfig): Promise<void> {
+async function ensureInit(
+  server: McpServerConfig,
+  opts: McpCallOptions = {}
+): Promise<void> {
   if (initialized.has(server.name)) return;
-  const res = await rpc(server, "initialize", {
-    protocolVersion: "2025-03-26",
-    capabilities: {},
-    clientInfo: CLIENT_INFO,
-  });
+  const res = await rpc(
+    server,
+    "initialize",
+    {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: CLIENT_INFO,
+    },
+    opts
+  );
   if (res?.error) {
     throw new Error(`MCP initialize failed: ${res.error.message ?? "unknown"}`);
   }
   initialized.add(server.name);
   try {
-    await rpc(server, "notifications/initialized");
+    await rpc(server, "notifications/initialized", undefined, opts);
   } catch {
     return;
   }
 }
 
-export async function listMcpTools(server: McpServerConfig): Promise<ToolSpec[]> {
-  await ensureInit(server);
-  const res = await rpc(server, "tools/list", {});
+export async function listMcpTools(
+  server: McpServerConfig,
+  opts: McpCallOptions = {}
+): Promise<ToolSpec[]> {
+  await ensureInit(server, opts);
+  const res = await rpc(server, "tools/list", {}, opts);
   if (res?.error) {
     throw new Error(`MCP tools/list failed: ${res.error.message ?? "unknown"}`);
   }
@@ -128,16 +158,22 @@ export function mcpToolRoute(
 export async function callMcpTool(
   server: McpServerConfig,
   tool: string,
-  argsJson: string
+  argsJson: string,
+  opts: McpCallOptions = {}
 ): Promise<string> {
-  await ensureInit(server);
+  await ensureInit(server, opts);
   let args: Record<string, unknown> = {};
   try {
     args = JSON.parse(argsJson || "{}");
   } catch {
     return "Invalid tool arguments JSON";
   }
-  const res = await rpc(server, "tools/call", { name: tool, arguments: args });
+  const res = await rpc(
+    server,
+    "tools/call",
+    { name: tool, arguments: args },
+    opts
+  );
   if (res?.error) {
     return `Tool error: ${res.error.message ?? "unknown"}`;
   }
@@ -156,21 +192,28 @@ export async function callMcpTool(
 let specsCache: { key: string; specs: ToolSpec[] } | null = null;
 
 export async function getMcpToolSpecs(
-  servers: McpServerConfig[]
+  servers: McpServerConfig[],
+  opts: McpCallOptions = {}
 ): Promise<ToolSpec[]> {
+  opts.signal?.throwIfAborted();
   const key = servers.map((s) => `${s.name}|${s.url}`).join(",");
   if (specsCache && specsCache.key === key) return specsCache.specs;
   const specs: ToolSpec[] = [];
   for (const server of servers) {
     try {
-      specs.push(...(await listMcpTools(server)));
+      specs.push(...(await listMcpTools(server, opts)));
     } catch (err) {
+      if (opts.signal?.aborted) {
+        specsCache = null;
+        throw err;
+      }
       console.warn(
         `[ai-assistant] MCP server "${server.name}" unavailable:`,
         err instanceof Error ? err.message : err
       );
     }
   }
+  opts.signal?.throwIfAborted();
   specsCache = { key, specs };
   return specs;
 }

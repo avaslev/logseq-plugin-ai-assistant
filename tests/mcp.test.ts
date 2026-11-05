@@ -46,6 +46,12 @@ function startServer(): Promise<void> {
             });
             return;
           case "tools/call":
+            if (
+              (body.params as { arguments?: { city?: string } } | undefined)
+                ?.arguments?.city === "stall"
+            ) {
+              return;
+            }
             reply({
               content: [{ type: "text", text: "sunny, +20" }],
               isError: false,
@@ -76,6 +82,7 @@ beforeEach(async () => {
 
 afterAll(() => {
   server?.close();
+  server?.closeAllConnections?.();
 });
 
 describe("parseMcpServers", () => {
@@ -158,6 +165,31 @@ describe("MCP client over HTTP", () => {
     resetMcpState();
     rpcLog.length = 0;
     await getMcpToolSpecs([serverConfig()]);
+    expect(rpcLog.map((r) => r.method)).toEqual([
+      "initialize",
+      "notifications/initialized",
+      "tools/list",
+    ]);
+  });
+
+  it("times out when a tool call stalls", async () => {
+    await expect(
+      callMcpTool(serverConfig(), "weather", '{"city":"stall"}', {
+        timeoutMs: 50,
+      })
+    ).rejects.toThrow(/timed out/i);
+  });
+
+  it("aborts requests and does not cache the aborted result", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      getMcpToolSpecs([serverConfig()], { signal: controller.signal })
+    ).rejects.toBeDefined();
+
+    rpcLog.length = 0;
+    const specs = await getMcpToolSpecs([serverConfig()]);
+    expect(specs).toHaveLength(1);
     expect(rpcLog.map((r) => r.method)).toEqual([
       "initialize",
       "notifications/initialized",

@@ -12,6 +12,7 @@ import {
   syncCurrentSession,
 } from "./chat";
 import { pickModel } from "./llm";
+import { shouldSubmitOnEnter } from "./input";
 import {
   getAvailableModels,
   getDefaultModel,
@@ -64,11 +65,15 @@ function isDarkColor(color: string): boolean {
 }
 
 function syncThemeVars(doc: Document) {
-  const styles = getComputedStyle(doc.documentElement);
+  const rootStyles = getComputedStyle(doc.documentElement);
+  const bodyStyles = doc.body ? getComputedStyle(doc.body) : null;
   const root = document.documentElement;
   let primaryBackground = "";
   for (const name of THEME_VARS) {
-    const value = styles.getPropertyValue(name).trim();
+    const value =
+      rootStyles.getPropertyValue(name).trim() ||
+      bodyStyles?.getPropertyValue(name).trim() ||
+      "";
     if (!value) continue;
     if (name === "--ls-primary-background-color") primaryBackground = value;
     root.style.setProperty(name, value);
@@ -244,6 +249,20 @@ function useAssistantSidebar(
     return () => {
       clearInterval(interval);
       window.removeEventListener("resize", measure);
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = undefined;
+      }
+      setParentFlag(false);
+      try {
+        const el = frame();
+        if (el) {
+          el.style.transition = "";
+          el.style.transform = "";
+        }
+      } catch {
+        return;
+      }
     };
   }, []);
 
@@ -255,7 +274,7 @@ function App() {
   const formRef = useRef<HTMLFormElement>(null);
   const geometryRef = useRef<Geometry | null>(null);
   const [pending, setPending] = useState(false);
-  const [hasInput, setHasInput] = useState(false);
+  const [draft, setDraft] = useState("");
   const [sessionPage, setSessionPage] = useState<string | null>(null);
   const [models, setModels] = useState<string[]>(getAvailableModels());
   const [selectedModel, setSelectedModel] = useState<string>(() =>
@@ -339,15 +358,13 @@ function App() {
   if (!rect) return null;
 
   const handleSend = async () => {
-    const field = fieldRef.current;
-    const content = field?.value.trim();
-    if (!content || pending) return;
+    const text = draft.trim();
+    if (!text || pending) return;
 
     setPending(true);
-    setHasInput(false);
-    field!.value = "";
+    setDraft("");
     try {
-      await sendMessage(content, selectedModel || getDefaultModel());
+      await sendMessage(text, selectedModel || getDefaultModel());
     } catch (err) {
       void logseq.UI.showMsg(
         `AI assistant: ${err instanceof Error ? err.message : String(err)}`,
@@ -356,25 +373,25 @@ function App() {
     } finally {
       setPending(false);
       autoResize();
-      field?.focus();
+      fieldRef.current?.focus();
     }
   };
 
-  const canSend = !pending && hasInput;
+  const canSend = !pending && !!draft.trim();
 
   const sendButtonStyle = pending
     ? {
-        backgroundColor: "var(--ls-primary-accent-color)",
-        color: "var(--ls-primary-accent-text-color)",
+        backgroundColor: "var(--ls-primary-accent-color, #6366f1)",
+        color: "var(--ls-primary-accent-text-color, #ffffff)",
       }
     : canSend
       ? {
-          backgroundColor: "var(--ls-primary-accent-color)",
-          color: "var(--ls-primary-accent-text-color)",
+          backgroundColor: "var(--ls-primary-accent-color, #6366f1)",
+          color: "var(--ls-primary-accent-text-color, #ffffff)",
         }
       : {
-          backgroundColor: "var(--ls-secondary-background-color)",
-          color: "var(--ls-secondary-text-color)",
+          backgroundColor: "var(--ls-secondary-background-color, transparent)",
+          color: "var(--ls-secondary-text-color, #9ca3af)",
         };
 
   const handleButtonClick = () => {
@@ -390,9 +407,9 @@ function App() {
       ref={formRef}
       className="pointer-events-auto flex w-full flex-col gap-1 overflow-hidden border-t p-1.5"
       style={{
-        backgroundColor: "var(--ls-secondary-background-color)",
-        borderTopColor: "var(--ls-border-color)",
-        color: "var(--ls-primary-text-color)",
+        backgroundColor: "var(--ls-secondary-background-color, transparent)",
+        borderTopColor: "var(--ls-border-color, #52525b)",
+        color: "var(--ls-primary-text-color, #e5e7eb)",
       }}
       onSubmit={(e) => {
         e.preventDefault();
@@ -402,32 +419,40 @@ function App() {
       <div
         className="ai-assistant-box flex items-end gap-1 rounded-md border p-1"
         style={{
-          backgroundColor: "var(--ls-primary-background-color)",
-          borderColor: "var(--ls-secondary-border-color)",
+          backgroundColor: "var(--ls-primary-background-color, transparent)",
+          borderColor: "var(--ls-secondary-border-color, #6b7280)",
         }}
       >
         <textarea
           ref={fieldRef}
           rows={1}
+          value={draft}
           placeholder="Type a message…"
           className="max-h-[200px] min-w-0 flex-1 resize-none bg-transparent px-1 py-0.5 text-sm outline-none"
           style={{
-            color: "var(--ls-primary-text-color)",
+            color: "var(--ls-primary-text-color, currentColor)",
           }}
-          onInput={(e) => {
-            setHasInput(!!e.currentTarget.value.trim());
+          onChange={(e) => {
+            setDraft(e.target.value);
             autoResize();
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            if (
+              shouldSubmitOnEnter({
+                key: e.key,
+                shiftKey: e.shiftKey,
+                isComposing: e.nativeEvent.isComposing,
+                keyCode: e.nativeEvent.keyCode,
+              })
+            ) {
               e.preventDefault();
-              handleSend();
+              void handleSend();
             }
           }}
         />
         <button
           type="button"
-          disabled={!pending && !hasInput}
+          disabled={!pending && !canSend}
           onMouseDown={(e) => e.preventDefault()}
           onClick={handleButtonClick}
           className="mb-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full hover:opacity-90 disabled:opacity-50"
@@ -464,14 +489,14 @@ function App() {
       </div>
       <div
         className="flex items-center justify-between gap-2 px-1"
-        style={{ color: "var(--ls-secondary-text-color)" }}
+        style={{ color: "var(--ls-secondary-text-color, #9ca3af)" }}
       >
         <span className="truncate text-[10px]">
           {sessionPage ?? `${SESSION_NAMESPACE}/…`}
         </span>
         <select
           className="ai-assistant-model-select max-w-[160px] shrink-0 bg-transparent text-[10px] outline-none"
-          style={{ color: "var(--ls-secondary-text-color)" }}
+          style={{ color: "var(--ls-secondary-text-color, #9ca3af)" }}
           value={selectedModel}
           onChange={(e) => setSelectedModel(e.target.value)}
           title="Model for this session"

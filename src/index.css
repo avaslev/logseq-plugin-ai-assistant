@@ -8,19 +8,19 @@ body {
 }
 
 .ai-assistant-input:focus {
-  border-color: var(--ls-primary-accent-color);
+  border-color: var(--ls-primary-accent-color, #6366f1);
 }
 
 .ai-assistant-input::placeholder {
-  color: var(--ls-secondary-text-color);
+  color: var(--ls-secondary-text-color, #9ca3af);
 }
 
 .ai-assistant-box:focus-within {
-  border-color: var(--ls-primary-accent-color);
+  border-color: var(--ls-primary-accent-color, #6366f1);
 }
 
 .ai-assistant-model-select option {
-  background-color: var(--ls-secondary-background-color);
-  color: var(--ls-primary-text-color);
+  background-color: var(--ls-secondary-background-color, #1e1e1e);
+  color: var(--ls-primary-text-color, #e5e7eb);
 }
 
