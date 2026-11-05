@@ -308,6 +308,18 @@ function isParentFocusInsideRightSidebar(): boolean {
   }
 }
 
+// While an editing session is active in the main editor, a programmatically
+// updated block can stay rendered as raw text until the next focus change.
+// Exiting edit mode after the final write makes the answer render immediately.
+export async function refreshAnswerBlockRender(): Promise<void> {
+  try {
+    if (!(await isSessionPageFocused())) return;
+    await logseq.Editor.exitEditingMode();
+  } catch {
+    // best-effort; older Logseq builds may not expose the API
+  }
+}
+
 export function cleanupAssistantUi(): void {
   try {
     window.parent.document.body.classList.remove("ai-assistant-bar-shown");
@@ -456,6 +468,7 @@ export async function sendMessage(
           // answer block disappeared; nothing meaningful to write
         }
       }
+      await refreshAnswerBlockRender();
       return;
     }
 
@@ -478,6 +491,7 @@ export async function sendMessage(
       await logseq.Editor.appendBlockInPage(page, replyText);
     }
     scrollChatIntoView();
+    await refreshAnswerBlockRender();
   } catch (err) {
     const aborted = signal.aborted;
     const message = err instanceof Error ? err.message : String(err);
@@ -491,6 +505,7 @@ export async function sendMessage(
         // answer block disappeared; skip the status mark
       }
     }
+    await refreshAnswerBlockRender();
     if (!aborted) {
       void logseq.UI.showMsg(`AI assistant: ${message}`, "error");
     }

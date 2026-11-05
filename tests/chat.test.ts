@@ -5,6 +5,7 @@ const logseqMock = vi.hoisted(() => ({
     upsertBlockProperty: vi.fn(),
     getPageBlocksTree: vi.fn(),
     getCurrentPage: vi.fn(),
+    exitEditingMode: vi.fn(),
   },
   settings: {},
 }));
@@ -14,7 +15,11 @@ vi.mock("@logseq/libs", () => {
   return { default: logseqMock, logseq: logseqMock };
 });
 
-import { isSessionPageFocused, persistSessionModel } from "../src/chat";
+import {
+  isSessionPageFocused,
+  persistSessionModel,
+  refreshAnswerBlockRender,
+} from "../src/chat";
 
 const metaBlock = (content: string, uuid = "meta-uuid") => ({
   uuid,
@@ -145,5 +150,35 @@ describe("isSessionPageFocused", () => {
     await expect(isSessionPageFocused()).resolves.toBe(false);
     fakeWindow(true);
     await expect(isSessionPageFocused()).resolves.toBe(true);
+  });
+});
+
+describe("refreshAnswerBlockRender", () => {
+  beforeEach(() => {
+    delete (globalThis as { window?: unknown }).window;
+  });
+
+  it("exits editing mode when the session page is focused", async () => {
+    logseqMock.Editor.getCurrentPage.mockResolvedValue({
+      name: "ai_assistant/20261104_x",
+    });
+    await refreshAnswerBlockRender();
+    expect(logseqMock.Editor.exitEditingMode).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing when the user is on another page", async () => {
+    logseqMock.Editor.getCurrentPage.mockResolvedValue({ name: "notes" });
+    await refreshAnswerBlockRender();
+    expect(logseqMock.Editor.exitEditingMode).not.toHaveBeenCalled();
+  });
+
+  it("swallows failures of the exit call", async () => {
+    logseqMock.Editor.getCurrentPage.mockResolvedValue({
+      name: "ai_assistant/20261104_x",
+    });
+    logseqMock.Editor.exitEditingMode.mockRejectedValue(
+      new Error("not supported")
+    );
+    await expect(refreshAnswerBlockRender()).resolves.toBeUndefined();
   });
 });
