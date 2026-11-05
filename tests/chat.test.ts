@@ -6,6 +6,18 @@ const logseqMock = vi.hoisted(() => ({
     getPageBlocksTree: vi.fn(),
     getCurrentPage: vi.fn(),
     exitEditingMode: vi.fn(),
+    deletePage: vi.fn(),
+    appendBlockInPage: vi.fn(),
+    removeBlock: vi.fn(),
+    updateBlock: vi.fn(),
+    getPage: vi.fn(),
+  },
+  UI: {
+    showMsg: vi.fn(),
+    clearRightSidebarBlocks: vi.fn(),
+  },
+  App: {
+    clearRightSidebarBlocks: vi.fn(),
   },
   settings: {},
 }));
@@ -15,11 +27,22 @@ vi.mock("@logseq/libs", () => {
   return { default: logseqMock, logseq: logseqMock };
 });
 
+vi.mock("../src/llm", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/llm")>();
+  return { ...actual, chatCompletion: vi.fn() };
+});
+
 import {
+  executeSlashCommand,
+  getCurrentSessionPage,
   isSessionPageFocused,
   persistSessionModel,
   refreshAnswerBlockRender,
+  syncCurrentSession,
 } from "../src/chat";
+import { chatCompletion } from "../src/llm";
+
+const chatCompletionMock = vi.mocked(chatCompletion);
 
 const metaBlock = (content: string, uuid = "meta-uuid") => ({
   uuid,
@@ -180,5 +203,118 @@ describe("refreshAnswerBlockRender", () => {
       new Error("not supported")
     );
     await expect(refreshAnswerBlockRender()).resolves.toBeUndefined();
+  });
+});
+
+describe("executeSlashCommand", () => {
+  beforeEach(() => {
+    syncCurrentSession(null);
+  });
+
+  it("rejects unknown commands", async () => {
+    await expect(executeSlashCommand("frobnicate", "m")).rejects.toThrow(
+      "Unknown command"
+    );
+  });
+
+  it("reports when there is no session to remove", async () => {
+    await executeSlashCommand("remove", "m");
+    expect(logseqMock.Editor.deletePage).not.toHaveBeenCalled();
+    const texts = logseqMock.UI.showMsg.mock.calls.map((call) => call[0]);
+    expect(texts.some((text) => String(text).includes("No active session"))).toBe(
+      true
+    );
+  });
+
+  it("removes the session immediately and clears the sidebar", async () => {
+    syncCurrentSession("ai_assistant/20261105_test");
+    logseqMock.Editor.getPage.mockResolvedValue(null);
+    await executeSlashCommand("remove", "m");
+    expect(logseqMock.Editor.deletePage).toHaveBeenCalledWith(
+      "ai_assistant/20261105_test"
+    );
+    expect(getCurrentSessionPage()).toBeNull();
+    expect(logseqMock.App.clearRightSidebarBlocks).toHaveBeenCalledWith({
+      close: false,
+    });
+    syncCurrentSession(null);
+  });
+
+  it("still resets the session when the deleted page lingers in cache", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    syncCurrentSession("ai_assistant/20261105_stuck");
+    logseqMock.Editor.getPage.mockResolvedValue({
+      name: "ai_assistant/20261105_stuck",
+    });
+    await executeSlashCommand("remove", "m");
+    expect(logseqMock.Editor.deletePage).toHaveBeenCalledTimes(1);
+    expect(logseqMock.App.clearRightSidebarBlocks).toHaveBeenCalledWith({
+      close: false,
+    });
+    expect(getCurrentSessionPage()).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+    syncCurrentSession(null);
+  });
+
+  it("reports when there is no session to compress", async () => {
+    await executeSlashCommand("compress", "m");
+    expect(logseqMock.Editor.appendBlockInPage).not.toHaveBeenCalled();
+    const texts = logseqMock.UI.showMsg.mock.calls.map((call) => call[0]);
+    expect(texts.some((text) => String(text).includes("No active session"))).toBe(
+      true
+    );
+  });
+
+  it("compresses the session and refreshes the block render", async () => {
+    syncCurrentSession("ai_assistant/20261105_comp");
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      {
+        uuid: "meta",
+        content: "AI Session\nmodel:: m\nstarted:: t",
+        children: [],
+      },
+      { uuid: "u1", content: "вопрос пользователя", children: [] },
+      { uuid: "a1", content: "✦ ответ ассистента", children: [] },
+    ]);
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "status" });
+    chatCompletionMock.mockResolvedValue({
+      content: "compressed summary",
+      reasoning: "",
+      toolCalls: [],
+    });
+
+    await executeSlashCommand("compress", "model-x");
+
+    expect(chatCompletionMock).toHaveBeenCalledTimes(1);
+    expect(logseqMock.Editor.removeBlock).toHaveBeenCalledWith("u1");
+    expect(logseqMock.Editor.removeBlock).toHaveBeenCalledWith("a1");
+    expect(logseqMock.Editor.removeBlock).toHaveBeenCalledWith("status");
+    const appended = logseqMock.Editor.appendBlockInPage.mock.calls.map(
+      (call) => call[1]
+    );
+    expect(appended.some((content) => String(content).startsWith("✦"))).toBe(
+      true
+    );
+    expect(logseqMock.Editor.exitEditingMode).toHaveBeenCalled();
+    syncCurrentSession(null);
+  });
+
+  it("keeps the history and marks the status block when compression fails", async () => {
+    syncCurrentSession("ai_assistant/20261105_fail");
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      { uuid: "u1", content: "вопрос", children: [] },
+    ]);
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "status" });
+    chatCompletionMock.mockRejectedValue(new Error("api down"));
+
+    await executeSlashCommand("compress", "model-x");
+
+    expect(logseqMock.Editor.removeBlock).not.toHaveBeenCalled();
+    expect(logseqMock.Editor.updateBlock).toHaveBeenCalledWith(
+      "status",
+      "⚠️ api down"
+    );
+    syncCurrentSession(null);
   });
 });

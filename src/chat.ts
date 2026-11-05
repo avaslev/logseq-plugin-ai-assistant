@@ -179,6 +179,168 @@ function isSessionMetaContent(content: string): boolean {
   );
 }
 
+function assistantInfo(text: string): void {
+  void logseq.UI.showMsg(`AI assistant: ${text}`);
+}
+
+const COMPRESS_SYSTEM_PROMPT = [
+  "You compress a chat session into a compact summary that will replace the session history.",
+  "Keep key facts, decisions, open questions, names and any page/block references.",
+  "Drop duplication, small talk and superseded details.",
+  "Reply in the same language as the conversation, with the summary only — no preamble.",
+].join(" ");
+
+async function removeSession(): Promise<void> {
+  const pageName = currentSessionPage;
+  if (!pageName) {
+    assistantInfo("No active session to remove");
+    return;
+  }
+
+  console.info(`[ai-assistant] /remove: deleting page ${pageName}`);
+  try {
+    await logseq.Editor.deletePage(pageName);
+  } catch (err) {
+    console.warn("[ai-assistant] /remove: deletePage failed:", err);
+    assistantInfo(
+      `Failed to remove the session: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+
+  // Some Logseq builds keep the deleted page in the entity cache for a while,
+  // so a lookup right after deletion is informational only.
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  try {
+    if (await logseq.Editor.getPage(pageName)) {
+      console.warn(
+        `[ai-assistant] /remove: page ${pageName} is still visible after deletePage (stale cache or refused deletion)`
+      );
+    }
+  } catch {
+    // lookup failed — assume the page is gone
+  }
+
+  if (currentSessionPage === pageName) currentSessionPage = null;
+  try {
+    // Drop the stale session page from the right sidebar; the assistant
+    // panel itself is re-shown by the visibility loop right after.
+    logseq.App.clearRightSidebarBlocks({ close: false });
+  } catch {
+    // sidebar cleanup is cosmetic
+  }
+  assistantInfo(`Session removed: ${pageName}`);
+}
+
+async function compressSession(model: string): Promise<void> {
+  const pageName = currentSessionPage;
+  if (!pageName) {
+    assistantInfo("No active session to compress");
+    return;
+  }
+
+  abortController?.abort();
+  const controller = new AbortController();
+  abortController = controller;
+  const signal = controller.signal;
+
+  let statusUuid: string | null = null;
+  try {
+    const status = await logseq.Editor.appendBlockInPage(
+      pageName,
+      "🗜️ Compressing the session…"
+    );
+    statusUuid = status ? String((status as { uuid?: unknown }).uuid ?? "") : null;
+
+    const tree =
+      ((await logseq.Editor.getPageBlocksTree(
+        pageName
+      )) as unknown as HistoryNode[]) ?? [];
+    const history = historyFromTree(tree, 1_000_000);
+    if (history.length === 0) {
+      if (statusUuid) await logseq.Editor.removeBlock(statusUuid);
+      assistantInfo("Nothing to compress: the session has no messages");
+      return;
+    }
+
+    const settings = getSettings();
+    const result = await chatCompletion({
+      baseUrl: settings.apiBaseUrl,
+      apiKey: settings.apiKey,
+      model,
+      messages: [
+        { role: "system", content: COMPRESS_SYSTEM_PROMPT },
+        ...history,
+        {
+          role: "user",
+          content:
+            "Compress the conversation above into the summary. Reply with the summary only.",
+        },
+      ],
+      signal,
+    });
+    signal.throwIfAborted();
+
+    const summary = toSingleBlockContent(stripThinkTags(result.content));
+    if (!summary) throw new Error("Empty summary");
+
+    const metaUuid = findSessionMetaBlock(tree)?.uuid ?? null;
+    let removed = 0;
+    for (const node of tree) {
+      const uuid = String(node.uuid ?? "");
+      if (!uuid || uuid === metaUuid || uuid === statusUuid) continue;
+      try {
+        await logseq.Editor.removeBlock(uuid);
+        removed++;
+      } catch {
+        // already gone; keep going
+      }
+    }
+    if (statusUuid) {
+      try {
+        await logseq.Editor.removeBlock(statusUuid);
+      } catch {
+        // already gone
+      }
+    }
+
+    await logseq.Editor.appendBlockInPage(
+      pageName,
+      markAssistantContent(`Сводка предыдущего диалога:\n${summary}`)
+    );
+    await refreshAnswerBlockRender();
+    assistantInfo(`Session compressed: ${removed} blocks → 1 summary block`);
+  } catch (err) {
+    const aborted = signal.aborted;
+    const message = err instanceof Error ? err.message : String(err);
+    if (statusUuid) {
+      try {
+        await logseq.Editor.updateBlock(
+          statusUuid,
+          aborted ? "⏹ Cancelled" : `⚠️ ${message}`
+        );
+      } catch {
+        // status block disappeared; skip the mark
+      }
+    }
+    await refreshAnswerBlockRender();
+    if (!aborted) {
+      assistantInfo(`Compression failed: ${message}`);
+    }
+  } finally {
+    if (abortController === controller) abortController = null;
+  }
+}
+
+export async function executeSlashCommand(
+  name: string,
+  model: string
+): Promise<void> {
+  if (name === "compress") return compressSession(model);
+  if (name === "remove") return removeSession();
+  throw new Error(`Unknown command: /${name}`);
+}
+
 function findSessionMetaBlock(
   tree: HistoryNode[]
 ): { uuid: string; content: string } | null {

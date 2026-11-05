@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelGeneration,
   sendMessage,
+  executeSlashCommand,
   getSessionModel,
   applyFallbackGeometry,
   applyFormGeometry,
@@ -12,6 +13,7 @@ import {
   syncCurrentSession,
   isSessionPageFocused,
 } from "./chat";
+import { matchSlashCommand } from "./commands";
 import { pickModel } from "./llm";
 import { shouldSubmitOnEnter } from "./input";
 import {
@@ -282,6 +284,7 @@ function focusFormField(field: HTMLTextAreaElement | null): void {
 function App() {
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const ghostRef = useRef<HTMLDivElement>(null);
   const geometryRef = useRef<Geometry | null>(null);
   const [pending, setPending] = useState(false);
   const [draft, setDraft] = useState("");
@@ -388,6 +391,29 @@ function App() {
     const text = draft.trim();
     if (!text || pending) return;
 
+    const cmd = matchSlashCommand(text);
+    if (cmd) {
+      if (!cmd.exact) {
+        setDraft(`/${cmd.name}`);
+        autoResize();
+        return;
+      }
+      setPending(true);
+      setDraft("");
+      try {
+        await executeSlashCommand(cmd.name, selectedModel || getDefaultModel());
+      } catch (err) {
+        void logseq.UI.showMsg(
+          `AI assistant: ${err instanceof Error ? err.message : String(err)}`,
+          "error"
+        );
+      } finally {
+        setPending(false);
+        autoResize();
+      }
+      return;
+    }
+
     setPending(true);
     setDraft("");
     try {
@@ -404,6 +430,7 @@ function App() {
   };
 
   const canSend = !pending && !!draft.trim();
+  const slash = matchSlashCommand(draft);
 
   const sendButtonStyle = pending
     ? {
@@ -449,33 +476,60 @@ function App() {
           borderColor: "var(--ls-secondary-border-color, #6b7280)",
         }}
       >
-        <textarea
-          ref={fieldRef}
-          rows={1}
-          value={draft}
-          placeholder="Type a message…"
-          className="max-h-[200px] min-w-0 flex-1 resize-none bg-transparent px-1 py-0.5 text-sm outline-none"
-          style={{
-            color: "var(--ls-primary-text-color, currentColor)",
-          }}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            autoResize();
-          }}
-          onKeyDown={(e) => {
-            if (
-              shouldSubmitOnEnter({
-                key: e.key,
-                shiftKey: e.shiftKey,
-                isComposing: e.nativeEvent.isComposing,
-                keyCode: e.nativeEvent.keyCode,
-              })
-            ) {
-              e.preventDefault();
-              void handleSend();
-            }
-          }}
-        />
+        <div className="relative min-w-0 flex-1">
+          <textarea
+            ref={fieldRef}
+            rows={1}
+            value={draft}
+            placeholder="Type a message…"
+            className="max-h-[200px] w-full resize-none bg-transparent px-1 py-0.5 text-sm outline-none"
+            style={{
+              color: "var(--ls-primary-text-color, currentColor)",
+            }}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              autoResize();
+            }}
+            onScroll={(e) => {
+              if (ghostRef.current) {
+                ghostRef.current.scrollTop = e.currentTarget.scrollTop;
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Tab" && slash && !slash.exact) {
+                e.preventDefault();
+                setDraft(`/${slash.name}`);
+                autoResize();
+                return;
+              }
+              if (
+                shouldSubmitOnEnter({
+                  key: e.key,
+                  shiftKey: e.shiftKey,
+                  isComposing: e.nativeEvent.isComposing,
+                  keyCode: e.nativeEvent.keyCode,
+                })
+              ) {
+                e.preventDefault();
+                void handleSend();
+              }
+            }}
+          />
+          {slash && !slash.exact && slash.complete ? (
+            <div
+              ref={ghostRef}
+              aria-hidden
+              className="pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap px-1 py-0.5 text-sm"
+              style={{
+                color: "var(--ls-secondary-text-color, #9ca3af)",
+                opacity: 0.75,
+              }}
+            >
+              <span className="invisible">{draft}</span>
+              <span>{slash.complete}</span>
+            </div>
+          ) : null}
+        </div>
         <button
           type="button"
           disabled={!pending && !canSend}
