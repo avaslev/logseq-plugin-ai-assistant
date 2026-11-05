@@ -1,3 +1,11 @@
+## [0.2.1](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.2.0...v0.2.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* render the final answer immediately by exiting edit mode ([8a8b9d9](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/8a8b9d9efb4ae858d21dfe1d8f6599e30a408625))
+* search the graph via the built-in query engine and add search_tasks ([86fec12](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/86fec129830986eae22a368503cf760c884342d8))
+
 # [0.2.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.1.0...v0.2.0) (2026-11-05)
 
 
