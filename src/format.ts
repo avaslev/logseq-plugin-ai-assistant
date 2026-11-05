@@ -24,20 +24,26 @@ const FENCE_END = /^\s*(`{3,}|~{3,})\s*$/;
 
 export const ASSISTANT_MARKER = "✦ ";
 
+// Markdown constructs that are only recognized at the start of a line:
+// code fences, tables, headings, quotes and lists. Prefixing them with
+// "✦ " inline would break their rendering.
+const BLOCK_START_PATTERN =
+  /^\s*(?:`{3,}|~{3,}|\||#{1,6}\s|>|[-*+]\s|\d+[.)]\s)/;
+
 export function isAssistantContent(text: string): boolean {
-  return /^\s*✦\s/.test(text);
+  return /^\s*✦(?:\s|$)/.test(text);
 }
 
 export function markAssistantContent(text: string): string {
   const trimmed = text.trim();
   if (!trimmed) return "";
-  return isAssistantContent(trimmed)
-    ? trimmed
-    : `${ASSISTANT_MARKER}${trimmed}`;
+  if (isAssistantContent(trimmed)) return trimmed;
+  if (BLOCK_START_PATTERN.test(trimmed)) return `✦\n\n${trimmed}`;
+  return `${ASSISTANT_MARKER}${trimmed}`;
 }
 
 export function stripAssistantMarker(text: string): string {
-  return text.replace(/^\s*✦\s+/, "");
+  return text.replace(/^\s*✦(?:\s+|$)/, "");
 }
 
 export function toSingleBlockContent(reply: string): string {

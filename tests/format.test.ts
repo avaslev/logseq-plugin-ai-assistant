@@ -119,6 +119,25 @@ describe("markAssistantContent", () => {
       `${ASSISTANT_MARKER}hello`
     );
   });
+
+  it("puts the marker on its own line for tables and code fences", () => {
+    const table = "| a | b |\n|---|---|\n| 1 | 2 |";
+    expect(markAssistantContent(table)).toBe(`✦\n\n${table}`);
+
+    const code = "```js\nconst x = 1;\n```";
+    expect(markAssistantContent(code)).toBe(`✦\n\n${code}`);
+
+    const tilde = "~~~sh\necho hi\n~~~";
+    expect(markAssistantContent(tilde)).toBe(`✦\n\n${tilde}`);
+  });
+
+  it("puts the marker on its own line for headings, quotes and lists", () => {
+    expect(markAssistantContent("# Title")).toBe("✦\n\n# Title");
+    expect(markAssistantContent("- item")).toBe("✦\n\n- item");
+    expect(markAssistantContent("1. first")).toBe("✦\n\n1. first");
+    expect(markAssistantContent("> quote")).toBe("✦\n\n> quote");
+    expect(markAssistantContent("plain text")).toBe("✦ plain text");
+  });
 });
 
 describe("historyFromTree", () => {
