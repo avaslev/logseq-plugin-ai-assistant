@@ -1,3 +1,16 @@
+# [0.2.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.1.0...v0.2.0) (2026-11-05)
+
+
+### Bug Fixes
+
+* keep the reply when the answer block is deleted during generation ([59a034e](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/59a034e7e456a5f8a89f26f904799590751e5f9b))
+
+
+### Features
+
+* return focus to the input bar when a session page is open ([d2b86c4](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/d2b86c4cd8de47781d98c13a1f485d2a5ccab6d0))
+* write tools for the open page, robustness fixes and theme fallbacks ([41baf5d](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/41baf5db9f5db78f6cdf27b062da9b4c16ded7bc))
+
 ## [2.1.1](https://github.com/pengx17/logseq-plugin-template-react/compare/v2.1.0...v2.1.1) (2022-03-24)
 
 
