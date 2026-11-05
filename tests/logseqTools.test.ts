@@ -9,6 +9,7 @@ import {
   getLogseqToolSpecs,
   getWriteToolSpecs,
   searchGraph,
+  searchTasks,
 } from "../src/logseqTools";
 
 function mockLogseqEditor(editor: Record<string, unknown>): void {
@@ -49,6 +50,7 @@ describe("filterBlocks", () => {
       uuid: "uuid-1",
       content: "Logseq is a tool",
       page: "journals",
+      marker: "",
     });
   });
 
@@ -70,6 +72,7 @@ describe("tool specs", () => {
   it("declares the read-only graph tools", () => {
     expect(names).toEqual([
       "search_graph",
+      "search_tasks",
       "get_page",
       "get_page_blocks",
       "get_block",
@@ -80,6 +83,7 @@ describe("tool specs", () => {
   it("requires arguments for search and lookups", () => {
     for (const spec of specs) {
       if (spec.function.name === "get_current_page") continue;
+      if (spec.function.name === "search_tasks") continue;
       expect(
         (spec.function.parameters.required as string[]).length
       ).toBeGreaterThan(0);
@@ -88,51 +92,186 @@ describe("tool specs", () => {
 });
 
 describe("searchGraph", () => {
-  it("uses filtered Datalog queries and caches repeated searches", async () => {
+  it("uses the built-in DSL query for blocks and getAllPages for pages", async () => {
     const q = vi.fn();
-    (globalThis as { logseq?: unknown }).logseq = { DB: { q } };
-    q.mockResolvedValueOnce([["AI Assistant"]])
-      .mockResolvedValueOnce([["u1", "AI assistant notes", "AI Assistant"]]);
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getAllPages: vi.fn().mockResolvedValue([{ name: "AI Assistant" }]),
+        getPage: vi.fn().mockResolvedValue({ name: "AI Assistant" }),
+      },
+      DB: { q, datascriptQuery },
+    };
+    q.mockResolvedValue([
+      { uuid: "u1", content: "AI assistant notes", page: 7 },
+    ]);
 
     const first = await searchGraph("assistant");
     expect(first).toEqual({
       pages: ["AI Assistant"],
       blocks: [
-        { uuid: "u1", content: "AI assistant notes", page: "AI Assistant" },
+        {
+          uuid: "u1",
+          content: "AI assistant notes",
+          page: "AI Assistant",
+          marker: "",
+        },
       ],
     });
-    expect(q).toHaveBeenCalledTimes(2);
-    expect(q.mock.calls[0][0]).toContain("clojure.string/includes?");
-    expect(q.mock.calls[0][0]).toContain('"assistant"');
+    expect(q).toHaveBeenCalledTimes(1);
+    expect(q.mock.calls[0][0]).toBe('"assistant"');
+    expect(datascriptQuery).not.toHaveBeenCalled();
 
     const second = await searchGraph("assistant");
     expect(second).toEqual(first);
+    expect(q).toHaveBeenCalledTimes(1);
+  });
+
+  it("escapes quotes in the DSL literal", async () => {
+    const q = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([]) },
+      DB: { q, datascriptQuery: vi.fn().mockResolvedValue([]) },
+    };
+    q.mockResolvedValue([]);
+    await searchGraph('he said "hi"');
+    expect(
+      q.mock.calls.some((call) =>
+        String(call[0]).includes('"he said \\"hi\\""')
+      )
+    ).toBe(true);
+  });
+
+  it("resolves page names via getBlock when the DSL row has no page hint", async () => {
+    const q = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getAllPages: vi.fn().mockResolvedValue([]),
+        getBlock: vi.fn().mockResolvedValue({ page: { id: 9 } }),
+        getPage: vi.fn().mockResolvedValue({ name: "Named page" }),
+      },
+      DB: { q, datascriptQuery: vi.fn().mockResolvedValue([]) },
+    };
+    q.mockResolvedValue([{ uuid: "u6", title: "Db graph hit" }]);
+
+    const result = await searchGraph("db graph");
+    expect(result).toEqual({
+      pages: [],
+      blocks: [
+        { uuid: "u6", content: "Db graph hit", page: "Named page", marker: "" },
+      ],
+    });
+    expect(q.mock.calls[0][0]).toBe('"db graph"');
+  });
+
+  it("falls back to datascriptQuery when the DSL query fails", async () => {
+    const q = vi.fn();
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([]) },
+      DB: { q, datascriptQuery },
+    };
+    q.mockRejectedValue(new Error("DSL unsupported"));
+    datascriptQuery.mockResolvedValue([["u3", "Probe block", "Probe page"]]);
+
+    const result = await searchGraph("probe");
+    expect(result).toEqual({
+      pages: [],
+      blocks: [
+        { uuid: "u3", content: "Probe block", page: "Probe page", marker: "" },
+      ],
+    });
+    expect(datascriptQuery).toHaveBeenCalledTimes(1);
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/content");
+    expect(datascriptQuery.mock.calls[0][1]).toBe("probe");
+  });
+
+  it("tries the title attribute for DB graphs", async () => {
+    const q = vi.fn();
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([]) },
+      DB: { q, datascriptQuery },
+    };
+    q.mockResolvedValue([]);
+    datascriptQuery
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([["u4", "Db title hit", "DbPage"]]);
+
+    const result = await searchGraph("db title");
+    expect(result).toEqual({
+      pages: [],
+      blocks: [
+        { uuid: "u4", content: "Db title hit", page: "DbPage", marker: "" },
+      ],
+    });
+    expect(datascriptQuery).toHaveBeenCalledTimes(2);
+    expect(datascriptQuery.mock.calls[1][0]).toContain(":block/title");
+  });
+
+  it("refines an empty multi-word query with the longest keyword", async () => {
+    const q = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([{ name: "Проекты" }]) },
+      DB: { q, datascriptQuery: vi.fn().mockResolvedValue([]) },
+    };
+    q.mockResolvedValue([]);
+
+    const result = await searchGraph("какие есть проекты");
+    expect(result).toEqual({ pages: ["Проекты"], blocks: [] });
+
+    const second = await searchGraph("какие есть проекты");
+    expect(second).toEqual(result);
     expect(q).toHaveBeenCalledTimes(2);
   });
 
-  it("escapes quotes in the embedded search literal", async () => {
+  it("falls back to a datalog page scan when getAllPages is unavailable", async () => {
     const q = vi.fn();
-    (globalThis as { logseq?: unknown }).logseq = { DB: { q } };
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {},
+      DB: { q, datascriptQuery },
+    };
     q.mockResolvedValue([]);
-    await searchGraph('he said "hi"');
-    expect(q.mock.calls[0][0]).toContain('"he said \\"hi\\""');
+    datascriptQuery
+      .mockResolvedValueOnce([["Scanword page"]])
+      .mockResolvedValue([]);
+
+    const result = await searchGraph("scanword");
+    expect(result).toEqual({
+      pages: ["Scanword page"],
+      blocks: [],
+    });
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/name");
   });
 
-  it("falls back to a full scan when the filtered query fails", async () => {
+  it("falls back to a full block scan when the filtered queries fail", async () => {
     const q = vi.fn();
-    (globalThis as { logseq?: unknown }).logseq = { DB: { q } };
-    q.mockRejectedValueOnce(new Error("clojure.string/lower-case unavailable"))
-      .mockResolvedValueOnce([["Fallback page"]])
-      .mockResolvedValueOnce([["u2", "Fallback block", "Fallback page"]]);
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([{ name: "Probeword page" }]) },
+      DB: { q, datascriptQuery },
+    };
+    q.mockRejectedValue(new Error("DSL unsupported"));
+    datascriptQuery
+      .mockRejectedValueOnce(new Error("clojure.string unavailable"))
+      .mockRejectedValueOnce(new Error("clojure.string unavailable"))
+      .mockResolvedValueOnce([["u5", "Probeword block", "Probeword page"]]);
 
-    const result = await searchGraph("fallback");
+    const result = await searchGraph("probeword");
     expect(result).toEqual({
-      pages: ["Fallback page"],
+      pages: ["Probeword page"],
       blocks: [
-        { uuid: "u2", content: "Fallback block", page: "Fallback page" },
+        {
+          uuid: "u5",
+          content: "Probeword block",
+          page: "Probeword page",
+          marker: "",
+        },
       ],
     });
-    expect(q).toHaveBeenCalledTimes(3);
+    expect(datascriptQuery).toHaveBeenCalledTimes(3);
+    expect(datascriptQuery.mock.calls[2][0]).not.toContain("includes?");
   });
 });
 
@@ -334,5 +473,83 @@ describe("write tools", () => {
       await executeLogseqTool("insert_block", '{"content":"x"}')
     );
     expect(result.error).toContain("No page is currently open");
+  });
+});
+
+describe("searchTasks", () => {
+  it("uses the built-in (task ...) DSL query and normalizes markers", async () => {
+    const q = vi.fn();
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getPage: vi
+          .fn()
+          .mockImplementation(async (id: number) => ({
+            name: id === 3 ? "Journal" : "Reading",
+          })),
+      },
+      DB: { q, datascriptQuery },
+    };
+    q.mockResolvedValue([
+      { uuid: "t1", content: "NOW сделать проект", marker: "now", page: 3 },
+      { uuid: "t2", content: "LATER прочитать", marker: ["later"], page: 4 },
+    ]);
+
+    const result = await searchTasks();
+    expect(q).toHaveBeenCalledTimes(1);
+    expect(q.mock.calls[0][0]).toBe("(task todo doing now later waiting)");
+    expect(result).toEqual([
+      {
+        uuid: "t1",
+        content: "NOW сделать проект",
+        page: "Journal",
+        marker: "now",
+      },
+      {
+        uuid: "t2",
+        content: "LATER прочитать",
+        page: "Reading",
+        marker: "later",
+      },
+    ]);
+    expect(datascriptQuery).not.toHaveBeenCalled();
+  });
+
+  it("passes the status filter into the DSL query", async () => {
+    const q = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getPage: vi.fn().mockResolvedValue({ name: "Journal" }) },
+      DB: { q, datascriptQuery: vi.fn() },
+    };
+    q.mockResolvedValue([
+      { uuid: "t3", content: "NOW срочно", marker: "now", page: 1 },
+    ]);
+
+    const result = await searchTasks("NOW, doing");
+    expect(q.mock.calls[0][0]).toBe("(task now doing)");
+    expect(result).toEqual([
+      { uuid: "t3", content: "NOW срочно", page: "Journal", marker: "now" },
+    ]);
+  });
+
+  it("falls back to a datalog marker scan when the DSL query fails", async () => {
+    const q = vi.fn();
+    const datascriptQuery = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([]) },
+      DB: { q, datascriptQuery },
+    };
+    q.mockRejectedValue(new Error("DSL unsupported"));
+    datascriptQuery.mockResolvedValue([
+      ["t4", "TODO buy milk", "Notes", "todo"],
+      ["t5", "LATER thing", "Notes", "later"],
+    ]);
+
+    const result = await searchTasks("todo");
+    expect(result).toEqual([
+      { uuid: "t4", content: "TODO buy milk", page: "Notes", marker: "todo" },
+    ]);
+    expect(datascriptQuery).toHaveBeenCalledTimes(1);
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/marker");
   });
 });

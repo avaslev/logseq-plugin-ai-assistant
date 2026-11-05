@@ -161,6 +161,7 @@ export function buildSystemPrompt(
     "",
     "Behavior rules:",
     "- The user's graph is their knowledge base: use search_graph before asking the user for details.",
+    "- Task statuses (TODO/DOING/NOW/LATER) are markers on blocks, not words in their text: use search_tasks to list tasks by status.",
     "- Keep answers concise.",
     "- Answer directly: do not restate the user's question at the start of your answer.",
     "- Never output thinking tags like <think>, </think> or /think — they are handled automatically.",
