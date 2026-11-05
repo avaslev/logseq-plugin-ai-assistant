@@ -334,6 +334,7 @@ export async function sendMessage(
   abortController = controller;
   const signal = controller.signal;
   let thinkingBlock: { uuid: string } | null = null;
+  let blockMissing = false;
 
   try {
     let page = currentSessionPage;
@@ -391,13 +392,20 @@ export async function sendMessage(
     let lastUpdate = 0;
     let contentAccum = "";
     const updateAnswerBlock = (): void => {
-      if (!thinkingBlock) return;
+      if (!thinkingBlock || blockMissing) return;
       const now = Date.now();
       if (now - lastUpdate < THINKING_UPDATE_INTERVAL_MS) return;
       lastUpdate = now;
       const normalized = toSingleBlockContent(contentAccum);
       if (!normalized) return;
-      void logseq.Editor.updateBlock(thinkingBlock.uuid, normalized);
+      void logseq.Editor.updateBlock(thinkingBlock.uuid, normalized).catch(
+        () => {
+          blockMissing = true;
+          console.warn(
+            "[ai-assistant] answer block was removed; the reply will be written as a new block"
+          );
+        }
+      );
     };
 
     const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
@@ -441,24 +449,47 @@ export async function sendMessage(
         loop.reasoning.trim()
     );
     if (!replyText) {
-      if (thinkingBlock) {
-        await logseq.Editor.updateBlock(thinkingBlock.uuid, "(empty reply)");
+      if (thinkingBlock && !blockMissing) {
+        try {
+          await logseq.Editor.updateBlock(thinkingBlock.uuid, "(empty reply)");
+        } catch {
+          // answer block disappeared; nothing meaningful to write
+        }
       }
       return;
     }
 
-    if (thinkingBlock) {
-      await logseq.Editor.updateBlock(thinkingBlock.uuid, replyText);
+    let wrote = false;
+    if (thinkingBlock && !blockMissing) {
+      try {
+        const existing = await logseq.Editor.getBlock(thinkingBlock.uuid);
+        if (existing) {
+          await logseq.Editor.updateBlock(thinkingBlock.uuid, replyText);
+          wrote = true;
+        }
+      } catch {
+        wrote = false;
+      }
+    }
+    if (!wrote) {
+      console.warn(
+        "[ai-assistant] answer block is unavailable; writing the reply as a new block"
+      );
+      await logseq.Editor.appendBlockInPage(page, replyText);
     }
     scrollChatIntoView();
   } catch (err) {
     const aborted = signal.aborted;
     const message = err instanceof Error ? err.message : String(err);
-    if (thinkingBlock) {
-      await logseq.Editor.updateBlock(
-        thinkingBlock.uuid,
-        aborted ? "⏹ Cancelled" : `⚠️ ${message}`
-      );
+    if (thinkingBlock && !blockMissing) {
+      try {
+        await logseq.Editor.updateBlock(
+          thinkingBlock.uuid,
+          aborted ? "⏹ Cancelled" : `⚠️ ${message}`
+        );
+      } catch {
+        // answer block disappeared; skip the status mark
+      }
     }
     if (!aborted) {
       void logseq.UI.showMsg(`AI assistant: ${message}`, "error");
