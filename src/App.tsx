@@ -10,6 +10,7 @@ import {
   SIDEBAR_DEFAULT_WIDTH,
   detectOpenSessionPage,
   syncCurrentSession,
+  isSessionPageFocused,
 } from "./chat";
 import { pickModel } from "./llm";
 import { shouldSubmitOnEnter } from "./input";
@@ -269,6 +270,15 @@ function useAssistantSidebar(
   return rect;
 }
 
+function focusFormField(field: HTMLTextAreaElement | null): void {
+  try {
+    (window.frameElement as HTMLElement | null)?.focus();
+  } catch {
+    window.focus();
+  }
+  field?.focus();
+}
+
 function App() {
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
@@ -350,9 +360,26 @@ function App() {
   }, [rect, autoResize]);
 
   const shown = rect !== null;
+  const prevShownRef = useRef(false);
 
   useEffect(() => {
-    if (shown && !pending) fieldRef.current?.focus();
+    if (!shown || pending) {
+      prevShownRef.current = shown;
+      return;
+    }
+    const firstAppearance = !prevShownRef.current;
+    prevShownRef.current = shown;
+    if (firstAppearance) {
+      focusFormField(fieldRef.current);
+      return;
+    }
+    let cancelled = false;
+    void isSessionPageFocused().then((sessionOpen) => {
+      if (!cancelled && sessionOpen) focusFormField(fieldRef.current);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [shown, pending]);
 
   if (!rect) return null;
@@ -373,7 +400,6 @@ function App() {
     } finally {
       setPending(false);
       autoResize();
-      fieldRef.current?.focus();
     }
   };
 

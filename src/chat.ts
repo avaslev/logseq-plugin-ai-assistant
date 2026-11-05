@@ -272,6 +272,42 @@ export function cancelGeneration(): void {
   abortController?.abort();
 }
 
+export async function isSessionPageFocused(): Promise<boolean> {
+  let mainPageName = "";
+  try {
+    const entity = await logseq.Editor.getCurrentPage();
+    if (entity) {
+      const entityRecord = entity as {
+        name?: string;
+        page?: { name?: string };
+      };
+      mainPageName = entityRecord.page?.name ?? entityRecord.name ?? "";
+    }
+  } catch {
+    return isParentFocusInsideRightSidebar();
+  }
+  if (
+    mainPageName &&
+    !mainPageName.toLowerCase().startsWith(`${SESSION_NAMESPACE}/`)
+  ) {
+    return isParentFocusInsideRightSidebar();
+  }
+  return true;
+}
+
+function isParentFocusInsideRightSidebar(): boolean {
+  try {
+    const doc = window.parent.document;
+    const active = doc.activeElement;
+    const sidebar = doc.getElementById("right-sidebar");
+    return Boolean(
+      active && sidebar && (active === sidebar || sidebar.contains(active))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function cleanupAssistantUi(): void {
   try {
     window.parent.document.body.classList.remove("ai-assistant-bar-shown");
