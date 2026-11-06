@@ -5,6 +5,7 @@ import {
   EMPTY_REPLY_TEXT,
   ERROR_PREFIX,
   THINKING_TEXT,
+  TOOL_REPLY_TEXT,
 } from "./strings";
 
 // Re-exported for backwards compatibility with existing imports.
@@ -107,7 +108,13 @@ export function toSingleBlockContent(reply: string): string {
 
 const HISTORY_NODE_MAX_LENGTH = 500;
 const SERVICE_BLOCK_PREFIXES = [ERROR_PREFIX, "⏹"];
-const SERVICE_BLOCK_TEXTS = [THINKING_TEXT, EMPTY_REPLY_TEXT, CANCELLED_TEXT, COMPRESSING_TEXT];
+const SERVICE_BLOCK_TEXTS = [
+  THINKING_TEXT,
+  EMPTY_REPLY_TEXT,
+  TOOL_REPLY_TEXT,
+  CANCELLED_TEXT,
+  COMPRESSING_TEXT,
+];
 
 function isServiceBlock(content: string): boolean {
   if (SERVICE_BLOCK_TEXTS.includes(content)) return true;
@@ -185,6 +192,7 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
     "Behavior rules:",
     "- The user's graph is their knowledge base: use search_graph before asking the user for details.",
     "- Task statuses (TODO/DOING/NOW/LATER) are markers on blocks, not words in their text: use search_tasks to list tasks by status.",
+    "- After using tools, finish with a short text summary of what you did; never end the reply empty.",
     "- Keep answers concise.",
     "- Answer directly: do not restate the user's question at the start of your answer.",
     "- Never output thinking tags like <think>, </think> or /think — they are handled automatically.",
@@ -202,6 +210,7 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
           "Page creation rules:",
           "- To create a NEW page the user explicitly asked for, call create_page with requested=true.",
           "- When YOU suggest creating a page, call create_page with requested=false: the user confirms it in the UI; if they decline, continue without the page and do not retry.",
+          "- first_block is the content of ONE Logseq block, same format as your answers: prefer plain text, **bold** and lists over # headings.",
           "- Pages under the ai_assistant namespace (sessions, skills, system prompt) are managed by the plugin and cannot be created with create_page.",
         ]
       : []),

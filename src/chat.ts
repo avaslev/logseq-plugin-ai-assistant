@@ -24,6 +24,7 @@ import {
   EMPTY_REPLY_TEXT,
   ERROR_PREFIX,
   THINKING_TEXT,
+  TOOL_REPLY_TEXT,
 } from "./strings";
 import { confirmAction } from "./confirm";
 import { estimateMessagesTokens, estimateTokens } from "./tokens";
@@ -788,7 +789,12 @@ export async function sendMessage(
     if (!replyText) {
       if (thinkingBlock && !blockMissing) {
         try {
-          await logseq.Editor.updateBlock(thinkingBlock.uuid, EMPTY_REPLY_TEXT);
+          await logseq.Editor.updateBlock(
+            thinkingBlock.uuid,
+            loop.messages.some((message) => message.role === "tool")
+              ? TOOL_REPLY_TEXT
+              : EMPTY_REPLY_TEXT
+          );
         } catch {
           // answer block disappeared; nothing meaningful to write
         }

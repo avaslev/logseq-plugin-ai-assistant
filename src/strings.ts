@@ -3,6 +3,8 @@
 
 export const THINKING_TEXT = "💭 Thinking…";
 export const EMPTY_REPLY_TEXT = "(empty reply)";
+export const TOOL_REPLY_TEXT =
+  "✅ Done — the request was completed with tools; no text reply";
 export const CANCELLED_TEXT = "⏹ Stopped";
 export const ERROR_PREFIX = "⚠️";
 export const COMPRESSING_TEXT = "🗜️ Compressing the session…";

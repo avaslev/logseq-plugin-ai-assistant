@@ -12,6 +12,7 @@ const logseqMock = vi.hoisted(() => ({
     updateBlock: vi.fn(),
     getPage: vi.fn(),
     getAllPages: vi.fn(),
+    getBlock: vi.fn(),
   },
   UI: {
     showMsg: vi.fn(),
@@ -519,6 +520,69 @@ describe("skill auto-selection (F24)", () => {
     const call = chatCompletionMock.mock.calls.at(-1)![0];
     expect(call.messages[0].content).not.toContain("Available skills");
     expect(call.tools ?? []).toHaveLength(0);
+  });
+});
+
+describe("empty reply fallback (tool-aware)", () => {
+  const meta = {
+    uuid: "meta",
+    content: "AI Session\nmodel:: m\nstarted:: t",
+    children: [],
+  };
+
+  beforeEach(() => {
+    syncCurrentSession("ai_assistant/20261106_empty");
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+    logseqMock.Editor.getBlock.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([meta]);
+  });
+
+  afterEach(() => {
+    syncCurrentSession(null);
+    logseqMock.settings = {};
+  });
+
+  it("writes a tool completion note when tools were used without text", async () => {
+    chatCompletionMock
+      .mockResolvedValueOnce({
+        content: "",
+        reasoning: "",
+        toolCalls: [
+          {
+            id: "t1",
+            type: "function",
+            function: { name: "get_current_page", arguments: "{}" },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ content: "", reasoning: "", toolCalls: [] });
+
+    await sendMessage("заполни страницу", "m");
+
+    expect(logseqMock.Editor.updateBlock).toHaveBeenCalledWith(
+      "thinking",
+      expect.stringContaining("completed with tools")
+    );
+    expect(logseqMock.Editor.updateBlock).not.toHaveBeenCalledWith(
+      "thinking",
+      "(empty reply)"
+    );
+  });
+
+  it("keeps (empty reply) when no tools were used", async () => {
+    chatCompletionMock.mockResolvedValue({
+      content: "",
+      reasoning: "",
+      toolCalls: [],
+    });
+
+    await sendMessage("молчаливый вопрос", "m");
+
+    expect(logseqMock.Editor.updateBlock).toHaveBeenCalledWith(
+      "thinking",
+      "(empty reply)"
+    );
   });
 });
 
