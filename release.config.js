@@ -20,7 +20,7 @@ module.exports = {
       "@semantic-release/exec",
       {
         prepareCmd:
-          "zip -qq -r logseq-ai-graph-assistant-${nextRelease.version}.zip dist readme.md logo.svg LICENSE package.json",
+          "zip -qq -r logseq-ai-graph-assistant-${nextRelease.version}.zip dist README.md logo.svg LICENSE package.json",
       },
     ],
     [
