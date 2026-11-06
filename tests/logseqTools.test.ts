@@ -607,6 +607,45 @@ describe("create_page tool", () => {
     expect(appendBlockInPage).toHaveBeenCalledWith("New Page", "intro text");
   });
 
+  it("normalizes markdown in the first block into single-block content", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"New Page","requested":true,"first_block":"# Проект\\n- цель a\\n- цель b"}'
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(appendBlockInPage).toHaveBeenCalledWith(
+      "New Page",
+      "Проект\n• цель a\n• цель b"
+    );
+  });
+
+  it("keeps code fences in the first block", async () => {
+    mockForCreate(null);
+    await executeLogseqTool(
+      "create_page",
+      '{"title":"New Page","requested":true,"first_block":"```sh\\nls -la\\n```"}'
+    );
+    expect(appendBlockInPage).toHaveBeenCalledWith(
+      "New Page",
+      "```sh\nls -la\n```"
+    );
+  });
+
+  it("skips the first block when it normalizes to nothing", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"New Page","requested":true,"first_block":"   \\n\\n  "}'
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(appendBlockInPage).not.toHaveBeenCalled();
+  });
+
   it("asks the user for confirmation when the agent proposes the page", async () => {
     mockForCreate(null);
     const { onConfirmRequest, resolveConfirm } = await import("../src/confirm");

@@ -1,5 +1,6 @@
 import "@logseq/libs";
 import { withTimeout } from "./http";
+import { toSingleBlockContent } from "./format";
 import type { ToolSpec } from "./llm";
 import { confirmActionWithSignal } from "./confirm";
 import { buildSkillPrompt, findSkill, listSkills } from "./skills";
@@ -860,8 +861,9 @@ async function createPageTool(
     {},
     { redirect: false, createFirstBlock: false }
   )) as { uuid?: unknown } | null;
-  if (firstBlock.trim()) {
-    await logseq.Editor.appendBlockInPage(name, firstBlock.trim());
+  const normalizedBlock = toSingleBlockContent(firstBlock);
+  if (normalizedBlock) {
+    await logseq.Editor.appendBlockInPage(name, normalizedBlock);
   }
   return {
     ok: true,
@@ -1059,7 +1061,7 @@ export function getWriteToolSpecs(): ToolSpec[] {
             first_block: {
               type: "string",
               description:
-                "Optional content of the first block on the new page",
+                "Optional content of the first block on the new page. Plain text for a SINGLE Logseq block, same format as your answers: # headings are stripped, markdown lists become • bullets, code fences are preserved",
             },
             requested: {
               type: "boolean",
