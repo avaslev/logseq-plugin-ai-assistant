@@ -1,3 +1,17 @@
+# [0.4.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.3.0...v0.4.0) (2026-11-06)
+
+
+### Bug Fixes
+
+* normalize the first block written by create_page ([74e1663](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/74e16638de5deadc8a4eb093437f5dfdc1a93926))
+* replace the bare empty reply with a tool completion note ([cf32df8](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/cf32df81a9e37359e08374c79cbeb2289ab709a2))
+
+
+### Features
+
+* agent tools, skills, confirmations and input UX (F8-F10, F14-F18, F22, F23) ([e2904ad](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/e2904ad1ffff6e0033eebd3ba28f1513570b8f88))
+* skill auto-selection via use_skill and create_page consent flow ([e04fc85](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/e04fc851fc3b58f11316d852369bf0f01b34b16b))
+
 # [0.3.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.2.1...v0.3.0) (2026-11-05)
 
 
