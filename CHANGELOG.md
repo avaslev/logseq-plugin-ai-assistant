@@ -1,3 +1,11 @@
+# [0.5.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.4.0...v0.5.0) (2026-11-06)
+
+
+### Features
+
+* render confirmations as a centered Logseq-style modal ([46a0a89](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/46a0a893280e7daa234d330fa8a9cde6fa1486b1)), closes [html/body/#app](https://github.com/html/body//issues/app)
+* web search via DuckDuckGo Lite (F21) ([7041524](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/7041524cd1043370305b52419c0c7882c545e75a))
+
 # [0.4.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.3.0...v0.4.0) (2026-11-06)
 
 
