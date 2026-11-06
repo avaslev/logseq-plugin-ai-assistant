@@ -466,10 +466,22 @@ function App() {
     };
   }, [rect, autoResize]);
 
-  // Re-measure the form height whenever the confirm card or attachment
-  // chips appear/disappear.
+  // Re-measure the form height when the content changes; while a
+  // confirmation modal is open, expand the iframe over the whole sidebar
+  // so the dialog renders as a centered overlay (Logseq-style), and
+  // restore the normal form geometry afterwards.
   useEffect(() => {
-    autoResize();
+    const geometry = geometryRef.current;
+    if (confirmRequest && geometry) {
+      applyFormGeometry(
+        geometry.left,
+        geometry.width,
+        geometry.parentHeight,
+        geometry.parentHeight
+      );
+    } else {
+      autoResize();
+    }
   }, [confirmRequest, textAttachments, autoResize]);
 
   // Escape cancels the pending confirmation (F17).
@@ -725,12 +737,26 @@ function App() {
     autoResize();
   };
 
+  const confirmCancel = () => {
+    resolveConfirm(false);
+    focusFormField(fieldRef.current);
+  };
+
+  const confirmOk = () => {
+    resolveConfirm(true);
+    focusFormField(fieldRef.current);
+  };
+
   return (
     <form
       ref={formRef}
-      className="pointer-events-auto flex w-full flex-col gap-1 overflow-hidden border-t p-1.5"
+      className={`pointer-events-auto relative flex w-full flex-col gap-1 overflow-hidden p-1.5 ${
+        confirmRequest ? "h-full justify-end" : "border-t"
+      }`}
       style={{
-        backgroundColor: "var(--ls-secondary-background-color, transparent)",
+        backgroundColor: confirmRequest
+          ? "transparent"
+          : "var(--ls-secondary-background-color, transparent)",
         borderTopColor: "var(--ls-border-color, #52525b)",
         color: "var(--ls-primary-text-color, #e5e7eb)",
       }}
@@ -741,58 +767,70 @@ function App() {
     >
       {confirmRequest ? (
         <div
-          className="ai-assistant-box flex flex-col gap-1.5 rounded-md border p-2"
-          style={{
-            backgroundColor: "var(--ls-primary-background-color, transparent)",
-            borderColor: confirmRequest.danger
-              ? "var(--ls-error-color, #ef4444)"
-              : "var(--ls-secondary-border-color, #6b7280)",
-          }}
+          className="fixed inset-0 z-10 flex items-center justify-center"
+          style={{ backgroundColor: "rgba(0, 0, 0, 0.45)" }}
         >
-          <div className="text-sm font-medium">{confirmRequest.title}</div>
-          {confirmRequest.description ? (
+          <div
+            className="w-[88%] max-w-[440px] rounded-lg p-4 shadow-xl"
+            style={{
+              backgroundColor:
+                "var(--ls-secondary-background-color, #1f2937)",
+              border: "1px solid var(--ls-border-color, #374151)",
+            }}
+          >
             <div
-              className="break-words text-xs"
-              style={{ color: "var(--ls-secondary-text-color, #9ca3af)" }}
+              className="text-base font-medium"
+              style={{ color: "var(--ls-primary-text-color, #e5e7eb)" }}
             >
-              {confirmRequest.description}
+              {confirmRequest.title}
             </div>
-          ) : null}
-          <div className="flex items-center justify-end gap-1.5">
-            <button
-              type="button"
-              className="rounded border px-2 py-1 text-xs hover:opacity-90"
-              style={{
-                borderColor: "var(--ls-secondary-border-color, #6b7280)",
-                color: "var(--ls-primary-text-color, #e5e7eb)",
-              }}
-              onClick={() => {
-                resolveConfirm(false);
-                focusFormField(fieldRef.current);
-              }}
-            >
-              {confirmRequest.cancelLabel ?? CONFIRM_CANCEL_LABEL}
-            </button>
-            <button
-              type="button"
-              autoFocus
-              className="rounded px-2 py-1 text-xs text-white hover:opacity-90"
-              style={{
-                backgroundColor: "var(--ls-error-color, #ef4444)",
-                color: "#ffffff",
-              }}
-              onClick={() => {
-                resolveConfirm(true);
-                focusFormField(fieldRef.current);
-              }}
-            >
-              {confirmRequest.confirmLabel ?? CONFIRM_CONFIRM_LABEL}
-            </button>
+            {confirmRequest.description ? (
+              <div
+                className="mt-2 break-words text-sm"
+                style={{ color: "var(--ls-secondary-text-color, #9ca3af)" }}
+              >
+                {confirmRequest.description}
+              </div>
+            ) : null}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-md px-3 py-1.5 text-sm hover:opacity-90"
+                style={{
+                  border: "1px solid var(--ls-border-color, #374151)",
+                  color: "var(--ls-primary-text-color, #e5e7eb)",
+                }}
+                onClick={confirmCancel}
+              >
+                {confirmRequest.cancelLabel ?? CONFIRM_CANCEL_LABEL}
+              </button>
+              <button
+                type="button"
+                autoFocus
+                className={`rounded-md px-3 py-1.5 text-sm hover:opacity-90 ${
+                  confirmRequest.danger ? "" : "text-white"
+                }`}
+                style={
+                  confirmRequest.danger
+                    ? {
+                        backgroundColor: "var(--ls-error-color, #ef4444)",
+                        color: "#ffffff",
+                      }
+                    : {
+                        backgroundColor:
+                          "var(--ls-primary-accent-color, #6366f1)",
+                        color: "#ffffff",
+                      }
+                }
+                onClick={confirmOk}
+              >
+                {confirmRequest.confirmLabel ?? CONFIRM_CONFIRM_LABEL}
+              </button>
+            </div>
           </div>
         </div>
-      ) : (
-        <>
-          {textAttachments.length > 0 ? (
+      ) : null}
+      {textAttachments.length > 0 ? (
             <div className="flex flex-wrap gap-1 px-0.5">
               {textAttachments.map((attachment) => (
                 <span
@@ -953,8 +991,6 @@ function App() {
               )}
             </button>
           </div>
-        </>
-      )}
       <div
         className="flex items-center justify-between gap-2 px-1"
         style={{ color: "var(--ls-secondary-text-color, #9ca3af)" }}

@@ -1,6 +1,14 @@
 @import "tailwindcss";
 
 html,
+body,
+#app {
+  /* Full height so the confirmation modal (h-full form + fixed overlay)
+     can span the whole plugin iframe when it expands over the sidebar. */
+  height: 100%;
+}
+
+html,
 body {
   background: transparent;
   pointer-events: none;

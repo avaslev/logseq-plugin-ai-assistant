@@ -302,8 +302,8 @@ async function removeSession(): Promise<void> {
   }
 
   const confirmed = await confirmAction({
-    title: "Remove session?",
-    description: `${pageName} — the page and all its messages will be deleted permanently.`,
+    title: "Delete this session?",
+    description: `Page "${pageName}" and all its messages will be deleted permanently. This action can not be undone.`,
     confirmLabel: "Delete",
     cancelLabel: "Cancel",
     danger: true,
