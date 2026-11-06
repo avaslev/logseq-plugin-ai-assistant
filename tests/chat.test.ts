@@ -586,6 +586,37 @@ describe("empty reply fallback (tool-aware)", () => {
   });
 });
 
+describe("web tools registration (F21)", () => {
+  afterEach(() => {
+    syncCurrentSession(null);
+    logseqMock.settings = {};
+  });
+
+  it("exposes web_search and fetch_page when tools are enabled", async () => {
+    syncCurrentSession("ai_assistant/20261106_web");
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      {
+        uuid: "meta",
+        content: "AI Session\nmodel:: m\nstarted:: t",
+        children: [],
+      },
+    ]);
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+    chatCompletionMock.mockResolvedValue({
+      content: "Ответ",
+      reasoning: "",
+      toolCalls: [],
+    });
+
+    await sendMessage("что нового в logseq?", "m");
+
+    const tools = chatCompletionMock.mock.calls.at(-1)![0].tools ?? [];
+    expect(tools.some((t) => t.function.name === "web_search")).toBe(true);
+    expect(tools.some((t) => t.function.name === "fetch_page")).toBe(true);
+  });
+});
+
 describe("getSentMessages (F22)", () => {
   it("returns full-length user messages of the session", async () => {
     const long = "y".repeat(600);

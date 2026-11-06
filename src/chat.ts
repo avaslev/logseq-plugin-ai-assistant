@@ -42,6 +42,7 @@ import {
   getSkillToolSpecs,
   getWriteToolSpecs,
 } from "./logseqTools";
+import { executeWebTool, getWebToolSpecs, isWebTool } from "./webTools";
 import {
   callMcpTool,
   getMcpToolSpecs,
@@ -529,6 +530,14 @@ async function routeTool(
   signal?.throwIfAborted();
   const route = mcpToolRoute(call.function.name);
   if (!route) {
+    if (isWebTool(call.function.name)) {
+      // Web tools (F21) are read-only and independent of the graph.
+      return executeWebTool(
+        call.function.name,
+        call.function.arguments,
+        signal
+      );
+    }
     const result = await executeLogseqTool(
       call.function.name,
       call.function.arguments,
@@ -709,6 +718,7 @@ export async function sendMessage(
     const tools = settings.enableTools
       ? [
           ...getLogseqToolSpecs(),
+          ...getWebToolSpecs(),
           ...(settings.enableWriteTools ? getWriteToolSpecs() : []),
           ...(catalog ? getSkillToolSpecs() : []),
           ...(await getMcpToolSpecs(
