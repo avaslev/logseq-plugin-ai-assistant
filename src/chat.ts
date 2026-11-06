@@ -28,14 +28,17 @@ import {
 import { confirmAction } from "./confirm";
 import { estimateMessagesTokens, estimateTokens } from "./tokens";
 import {
-  createSkillPage,
-  readSystemPromptOverride,
+  buildSkillsCatalog,
   buildSkillPrompt,
+  createSkillPage,
+  listSkills,
+  readSystemPromptOverride,
   type Skill,
 } from "./skills";
 import {
   executeLogseqTool,
   getLogseqToolSpecs,
+  getSkillToolSpecs,
   getWriteToolSpecs,
 } from "./logseqTools";
 import {
@@ -527,7 +530,8 @@ async function routeTool(
   if (!route) {
     const result = await executeLogseqTool(
       call.function.name,
-      call.function.arguments
+      call.function.arguments,
+      signal
     );
     signal?.throwIfAborted();
     return result;
@@ -675,10 +679,21 @@ export async function sendMessage(
     const basePrompt = systemOverride
       ? `${systemOverride}\n\nToday's date: ${new Date().toISOString().slice(0, 10)}.`
       : buildSystemPrompt(new Date(), settings.enableWriteTools);
-    const systemPrompt =
-      options?.skill != null
-        ? `${basePrompt}\n\n${buildSkillPrompt(options.skill)}`
-        : basePrompt;
+
+    // Without an explicit /skill invocation, advertise the catalog and let
+    // the model load a skill itself via the use_skill tool (needs tools on).
+    const skill = options?.skill ?? null;
+    const catalog =
+      skill == null && settings.enableTools
+        ? buildSkillsCatalog(await listSkills())
+        : "";
+    const systemPrompt = [
+      basePrompt,
+      catalog,
+      skill ? buildSkillPrompt(skill) : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemPrompt },
@@ -694,6 +709,7 @@ export async function sendMessage(
       ? [
           ...getLogseqToolSpecs(),
           ...(settings.enableWriteTools ? getWriteToolSpecs() : []),
+          ...(catalog ? getSkillToolSpecs() : []),
           ...(await getMcpToolSpecs(
             parseMcpServers(settings.mcpServers),
             { signal }

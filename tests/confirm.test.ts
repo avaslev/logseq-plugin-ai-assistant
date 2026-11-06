@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   confirmAction,
+  confirmActionWithSignal,
   getPendingConfirm,
   onConfirmRequest,
   resolveConfirm,
@@ -68,5 +69,46 @@ describe("confirmAction", () => {
     const unsubscribe = onConfirmRequest(() => {});
     unsubscribe();
     await expect(confirmAction({ title: "x" })).resolves.toBe(true);
+  });
+});
+
+describe("confirmActionWithSignal", () => {
+  it("resolves with the UI decision when not aborted", async () => {
+    const unsubscribe = onConfirmRequest(() => resolveConfirm(true));
+    const controller = new AbortController();
+    await expect(
+      confirmActionWithSignal({ title: "Create page?" }, controller.signal)
+    ).resolves.toBe(true);
+    unsubscribe();
+  });
+
+  it("rejects immediately when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      confirmActionWithSignal({ title: "x" }, controller.signal)
+    ).rejects.toThrow();
+  });
+
+  it("rejects when the signal fires while the card is pending", async () => {
+    const controller = new AbortController();
+    const promise = confirmActionWithSignal(
+      { title: "x" },
+      controller.signal
+    ).catch((err) => err);
+
+    controller.abort();
+    const err = await promise;
+    expect(err.name).toBe("AbortError");
+    // The underlying request is still pending; clean it up.
+    resolveConfirm(false);
+  });
+
+  it("works without a signal", async () => {
+    const unsubscribe = onConfirmRequest(() => resolveConfirm(false));
+    await expect(
+      confirmActionWithSignal({ title: "x" })
+    ).resolves.toBe(false);
+    unsubscribe();
   });
 });

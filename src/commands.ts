@@ -12,7 +12,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "remove",
-    description: "Delete the active session page (asks for confirmation)",
+    description: "Delete the active session page",
   },
   {
     name: "skill",

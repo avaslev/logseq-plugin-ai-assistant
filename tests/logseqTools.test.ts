@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@logseq/libs", () => ({ logseq: {} }));
 
+import { resetSkillsCache } from "../src/skills";
 import {
   executeLogseqTool,
   filterBlocks,
   filterPageNames,
   getLogseqToolSpecs,
+  getSkillToolSpecs,
   getWriteToolSpecs,
   journalDayNumber,
   journalRowsToBlocks,
@@ -312,8 +314,9 @@ describe("getWriteToolSpecs", () => {
   const specs = getWriteToolSpecs();
   const names = specs.map((s) => s.function.name);
 
-  it("declares the write tools for the open page", () => {
+  it("declares the write tools", () => {
     expect(names).toEqual([
+      "create_page",
       "insert_block",
       "prepend_block",
       "update_block",
@@ -329,6 +332,74 @@ describe("getWriteToolSpecs", () => {
         (spec.function.parameters.required as string[]).length
       ).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("skill tool (use_skill)", () => {
+  beforeEach(() => {
+    resetSkillsCache();
+  });
+
+  it("declares the use_skill spec", () => {
+    const specs = getSkillToolSpecs();
+    expect(specs).toHaveLength(1);
+    expect(specs[0].function.name).toBe("use_skill");
+    expect(specs[0].function.parameters).toMatchObject({
+      type: "object",
+      required: ["name"],
+    });
+  });
+
+  it("returns the raw skill prompt for a known skill", async () => {
+    mockLogseqEditor({
+      getPage: vi.fn().mockResolvedValue({ uuid: "p1" }),
+      getPageBlocksTree: vi.fn().mockResolvedValue([
+        { content: "AI Skill\nname:: Explain Code\ndescription:: d" },
+        { content: "Step 1: read the code" },
+      ]),
+      getAllPages: vi.fn().mockResolvedValue([]),
+    });
+    const result = await executeLogseqTool(
+      "use_skill",
+      '{"name":"Explain Code"}'
+    );
+    expect(result).toContain("Skill: Explain Code");
+    expect(result).toContain("Step 1: read the code");
+    expect(result.startsWith("{")).toBe(false);
+  });
+
+  it("lists available skills when the name is unknown", async () => {
+    mockLogseqEditor({
+      getPage: vi
+        .fn()
+        .mockImplementation(async (name: string) =>
+          name === "ai_assistant/skills/alpha" ? { uuid: "p1" } : null
+        ),
+      getPageBlocksTree: vi.fn().mockResolvedValue([
+        { content: "AI Skill\nname:: Alpha" },
+        { content: "Do alpha things" },
+      ]),
+      getAllPages: vi
+        .fn()
+        .mockResolvedValue([
+          { name: "ai_assistant/skills/alpha" },
+          { name: "other/page" },
+        ]),
+    });
+    const result = await executeLogseqTool("use_skill", '{"name":"beta"}');
+    expect(result).toContain("Unknown skill: beta");
+    expect(result).toContain("Available: Alpha");
+  });
+
+  it("explains when no skills exist at all", async () => {
+    mockLogseqEditor({
+      getPage: vi.fn().mockResolvedValue(null),
+      getPageBlocksTree: vi.fn().mockResolvedValue([]),
+      getAllPages: vi.fn().mockResolvedValue([]),
+    });
+    const result = await executeLogseqTool("use_skill", '{"name":"nope"}');
+    expect(result).toContain("Unknown skill: nope");
+    expect(result).toContain("No skills are defined");
   });
 });
 
@@ -485,6 +556,134 @@ describe("write tools", () => {
       await executeLogseqTool("insert_block", '{"content":"x"}')
     );
     expect(result.error).toContain("No page is currently open");
+  });
+});
+
+describe("create_page tool", () => {
+  const createPage = vi.fn();
+  const appendBlockInPage = vi.fn();
+
+  function mockForCreate(getPageResult: unknown = null): void {
+    createPage.mockResolvedValue({ name: "New Page", uuid: "np-uuid" });
+    appendBlockInPage.mockResolvedValue({ uuid: "b1" });
+    mockLogseqEditor({
+      getPage: vi.fn().mockResolvedValue(getPageResult),
+      createPage,
+      appendBlockInPage,
+    });
+  }
+
+  it("creates the page immediately when the user explicitly requested it", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"New Page","requested":true}'
+      )
+    );
+    expect(result).toEqual({
+      ok: true,
+      name: "New Page",
+      uuid: "np-uuid",
+      created: true,
+    });
+    expect(createPage).toHaveBeenCalledWith(
+      "New Page",
+      {},
+      { redirect: false, createFirstBlock: false }
+    );
+    expect(appendBlockInPage).not.toHaveBeenCalled();
+  });
+
+  it("appends the first block when provided", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"New Page","requested":true,"first_block":"intro text"}'
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(appendBlockInPage).toHaveBeenCalledWith("New Page", "intro text");
+  });
+
+  it("asks the user for confirmation when the agent proposes the page", async () => {
+    mockForCreate(null);
+    const { onConfirmRequest, resolveConfirm } = await import("../src/confirm");
+    const unsubscribe = onConfirmRequest((request) => {
+      if (!request) return;
+      expect(request.title).toBe("Create page?");
+      expect(request.description).toContain("Agent Page");
+      resolveConfirm(true);
+    });
+
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"Agent Page","requested":false}'
+      )
+    );
+    expect(result).toEqual({
+      ok: true,
+      name: "Agent Page",
+      uuid: "np-uuid",
+      created: true,
+    });
+    expect(createPage).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("does not create the page when the user declines", async () => {
+    mockForCreate(null);
+    const { onConfirmRequest, resolveConfirm } = await import("../src/confirm");
+    const unsubscribe = onConfirmRequest(() => resolveConfirm(false));
+
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"Agent Page","requested":false}'
+      )
+    );
+    expect(result.error).toContain("declined");
+    expect(createPage).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("reuses an existing page instead of duplicating it", async () => {
+    mockForCreate({ name: "Existing Page", uuid: "old-uuid" });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"Existing Page","requested":true}'
+      )
+    );
+    expect(result).toEqual({
+      ok: true,
+      name: "Existing Page",
+      uuid: "old-uuid",
+      existed: true,
+    });
+    expect(createPage).not.toHaveBeenCalled();
+  });
+
+  it("refuses to create pages in the ai_assistant namespace", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        '{"title":"ai_assistant/skills/hack","requested":true}'
+      )
+    );
+    expect(result.error).toContain("ai_assistant");
+    expect(createPage).not.toHaveBeenCalled();
+  });
+
+  it("requires a title", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool("create_page", '{"requested":true}')
+    );
+    expect(result.error).toContain("title is required");
   });
 });
 

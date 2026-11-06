@@ -67,3 +67,30 @@ export function resolveConfirm(ok: boolean): void {
   emit();
   resolve(ok);
 }
+
+// confirmAction() tied to an abort signal: rejects with AbortError when the
+// signal fires while the card is still pending (user pressed Stop).
+export function confirmActionWithSignal(
+  spec: ConfirmRequest,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const confirmed = confirmAction(spec);
+  if (!signal) return confirmed;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    confirmed.then(
+      (ok) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(ok);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      }
+    );
+  });
+}

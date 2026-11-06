@@ -198,6 +198,11 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
           "- Newlines inside the content parameter are line breaks within that same block, not new blocks.",
           "- For destructive actions (remove_block, move_block) describe what you are about to change and confirm with the user first if the request is ambiguous.",
           "- After editing, briefly report what changed; do not paste whole edited blocks back unless asked.",
+          "",
+          "Page creation rules:",
+          "- To create a NEW page the user explicitly asked for, call create_page with requested=true.",
+          "- When YOU suggest creating a page, call create_page with requested=false: the user confirms it in the UI; if they decline, continue without the page and do not retry.",
+          "- Pages under the ai_assistant namespace (sessions, skills, system prompt) are managed by the plugin and cannot be created with create_page.",
         ]
       : []),
   ].join("\n");

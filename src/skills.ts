@@ -43,6 +43,21 @@ export function buildSkillPrompt(skill: Skill): string {
     .join("\n");
 }
 
+// Compact catalog for the system prompt: names and one-line descriptions
+// only, so the model can decide whether to load a skill via use_skill.
+export function buildSkillsCatalog(skills: Skill[]): string {
+  if (skills.length === 0) return "";
+  const lines = skills.map((skill) => {
+    const description = skill.description.replace(/\s+/g, " ").trim();
+    return `- ${skill.name}${description ? ` — ${description}` : ""}`;
+  });
+  return [
+    "Available skills (the user can also invoke them explicitly as /name):",
+    ...lines,
+    "When the request clearly matches a skill, call the use_skill tool with its exact name to load the full instructions before answering; do not call it for unrelated requests.",
+  ].join("\n");
+}
+
 function treeToText(nodes: unknown): string {
   const list = Array.isArray(nodes) ? nodes : [];
   return list

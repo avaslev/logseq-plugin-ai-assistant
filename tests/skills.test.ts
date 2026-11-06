@@ -17,6 +17,7 @@ vi.mock("@logseq/libs", () => {
 
 import {
   buildSkillPrompt,
+  buildSkillsCatalog,
   createSkillPage,
   ensureSystemPromptPage,
   findSkill,
@@ -80,6 +81,33 @@ describe("buildSkillPrompt", () => {
       page: "p",
     });
     expect(prompt).not.toContain("()");
+  });
+});
+
+describe("buildSkillsCatalog", () => {
+  it("returns an empty string for no skills", () => {
+    expect(buildSkillsCatalog([])).toBe("");
+  });
+
+  it("lists skills with one-line descriptions and the tool hint", () => {
+    const text = buildSkillsCatalog([
+      {
+        name: "Explain Code",
+        description: "Explains snippets\nof  code",
+        content: "steps",
+        page: "ai_assistant/skills/explain",
+      },
+      {
+        name: "Translate",
+        description: "",
+        content: "steps",
+        page: "ai_assistant/skills/translate",
+      },
+    ]);
+    expect(text).toContain("Available skills");
+    expect(text).toContain("- Explain Code — Explains snippets of code");
+    expect(text).toContain("- Translate");
+    expect(text).toContain("use_skill");
   });
 });
 

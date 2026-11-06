@@ -11,6 +11,7 @@ const logseqMock = vi.hoisted(() => ({
     removeBlock: vi.fn(),
     updateBlock: vi.fn(),
     getPage: vi.fn(),
+    getAllPages: vi.fn(),
   },
   UI: {
     showMsg: vi.fn(),
@@ -48,6 +49,7 @@ import {
 } from "../src/chat";
 import { chatCompletion, LlmError } from "../src/llm";
 import { onConfirmRequest, resolveConfirm } from "../src/confirm";
+import { resetSkillsCache } from "../src/skills";
 
 const chatCompletionMock = vi.mocked(chatCompletion);
 
@@ -439,6 +441,84 @@ describe("send state and retry (F15)", () => {
     expect(state.usage).not.toBeNull();
     expect(state.usage!.contextTokens).toBeGreaterThan(0);
     expect(state.usage!.outputTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("skill auto-selection (F24)", () => {
+  const meta = {
+    uuid: "meta",
+    content: "AI Session\nmodel:: m\nstarted:: t",
+    children: [],
+  };
+  const skillTree = [
+    { content: "AI Skill\nname:: Alpha\ndescription:: does alpha things" },
+    { content: "Do alpha things carefully" },
+  ];
+
+  beforeEach(() => {
+    resetSkillsCache();
+    syncCurrentSession("ai_assistant/20261106_skill");
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+    logseqMock.Editor.getPage.mockImplementation(async (name: string) =>
+      name === "ai_assistant/skills/alpha" ? { uuid: "skill-uuid" } : null
+    );
+    logseqMock.Editor.getPageBlocksTree.mockImplementation(
+      async (ref: string) => (ref === "skill-uuid" ? skillTree : [meta])
+    );
+    logseqMock.Editor.getAllPages.mockResolvedValue([
+      { name: "ai_assistant/skills/alpha" },
+    ]);
+    chatCompletionMock.mockResolvedValue({
+      content: "Ответ",
+      reasoning: "",
+      toolCalls: [],
+    });
+  });
+
+  afterEach(() => {
+    syncCurrentSession(null);
+    logseqMock.settings = {};
+  });
+
+  it("adds the catalog and the use_skill tool when tools are on", async () => {
+    await sendMessage("help with alpha", "m");
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
+    expect(call.messages[0].content).toContain("Available skills");
+    expect(call.messages[0].content).toContain("Alpha — does alpha things");
+    expect(call.tools?.some((t) => t.function.name === "use_skill")).toBe(
+      true
+    );
+  });
+
+  it("does not advertise skills when one is invoked explicitly", async () => {
+    await sendMessage("request", "m", {
+      skill: {
+        name: "Alpha",
+        description: "does alpha things",
+        content: "Do alpha things carefully",
+        page: "ai_assistant/skills/alpha",
+      },
+    });
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
+    expect(call.messages[0].content).toContain("Skill: Alpha");
+    expect(call.messages[0].content).not.toContain("Available skills");
+    expect(call.tools?.some((t) => t.function.name === "use_skill")).toBe(
+      false
+    );
+    expect(logseqMock.Editor.getAllPages).not.toHaveBeenCalled();
+  });
+
+  it("omits the catalog and the tool when tools are disabled", async () => {
+    logseqMock.settings = { enableTools: false };
+
+    await sendMessage("help with alpha", "m");
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
+    expect(call.messages[0].content).not.toContain("Available skills");
+    expect(call.tools ?? []).toHaveLength(0);
   });
 });
 

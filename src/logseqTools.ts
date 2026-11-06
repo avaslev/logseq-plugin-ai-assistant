@@ -1,6 +1,8 @@
 import "@logseq/libs";
 import { withTimeout } from "./http";
 import type { ToolSpec } from "./llm";
+import { confirmActionWithSignal } from "./confirm";
+import { buildSkillPrompt, findSkill, listSkills } from "./skills";
 
 const MAX_TOOL_OUTPUT = 4000;
 const MAX_SEARCH_RESULTS = 15;
@@ -799,6 +801,76 @@ async function upsertBlockPropertyTool(
   return { ok: true, uuid, key };
 }
 
+// --- create_page (user-requested or agent-proposed with consent) ------------
+
+async function createPageTool(
+  title: string,
+  firstBlock: string,
+  requested: boolean,
+  signal?: AbortSignal
+): Promise<unknown> {
+  const name = title.trim();
+  if (!name) return { error: "title is required" };
+  const lower = name.toLowerCase();
+  if (lower === "ai_assistant" || lower.startsWith(SESSION_PAGE_PREFIX)) {
+    return {
+      error: `Pages under "${SESSION_PAGE_PREFIX}" are managed by the AI assistant (sessions, skills, system prompt) and cannot be created with create_page`,
+    };
+  }
+
+  // Reuse an existing page instead of duplicating it.
+  const existing = (await logseq.Editor.getPage(name)) as {
+    name?: unknown;
+    uuid?: unknown;
+  } | null;
+  if (existing) {
+    return {
+      ok: true,
+      name: String(existing.name ?? name),
+      uuid: existing.uuid ? String(existing.uuid) : null,
+      existed: true,
+    };
+  }
+
+  let confirmed = requested;
+  if (!confirmed) {
+    // The agent proposed this page itself: ask the user first.
+    try {
+      confirmed = await confirmActionWithSignal(
+        {
+          title: "Create page?",
+          description: `The assistant wants to create a new page "${name}".`,
+          confirmLabel: "Create",
+          cancelLabel: "Cancel",
+        },
+        signal
+      );
+    } catch {
+      return { error: "cancelled by the user" };
+    }
+  }
+  if (!confirmed) {
+    return {
+      error: `User declined to create the page "${name}". Do not retry; continue without the page or ask the user what they prefer.`,
+    };
+  }
+
+  const page = (await logseq.Editor.createPage(
+    name,
+    {},
+    { redirect: false, createFirstBlock: false }
+  )) as { uuid?: unknown } | null;
+  if (firstBlock.trim()) {
+    await logseq.Editor.appendBlockInPage(name, firstBlock.trim());
+  }
+  return {
+    ok: true,
+    name,
+    uuid: page?.uuid ? String(page.uuid) : null,
+    created: true,
+  };
+}
+
 async function withCurrentPage(
   fn: (page: CurrentPage) => Promise<unknown>
 ): Promise<unknown> {
@@ -977,6 +1049,31 @@ export function getWriteToolSpecs(): ToolSpec[] {
     {
       type: "function",
       function: {
+        name: "create_page",
+        description:
+          'Create a new page in the graph. Set requested=true ONLY when the user explicitly asked for a page to be created in their current request. When YOU propose the page yourself, pass requested=false — the user will confirm it in the UI; if they decline, do not retry, continue without the page. An existing page with the same name is reused instead of duplicated.',
+        parameters: {
+          type: "object",
+          properties: {
+            title: { type: "string", description: "Name of the new page" },
+            first_block: {
+              type: "string",
+              description:
+                "Optional content of the first block on the new page",
+            },
+            requested: {
+              type: "boolean",
+              description:
+                "true when the user explicitly asked for this page in the current request; false when you propose it yourself (then the user confirms)",
+            },
+          },
+          required: ["title", "requested"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "insert_block",
         description: `Append a new block to the end of the currently open page, or insert one right after a given block uuid. ${WRITE_TOOL_PAGE_NOTE}`,
         parameters: {
@@ -1092,9 +1189,51 @@ function stringify(data: unknown): string {
   return truncate(data);
 }
 
+// Skills are advertised in the system prompt as a catalog; this tool loads
+// the full instructions of one skill on the model's request.
+export function getSkillToolSpecs(): ToolSpec[] {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "use_skill",
+        description:
+          "Load the full instructions of a skill from the Available skills catalog. Call it before answering when the request clearly matches one of the listed skills; do not call it for unrelated requests.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "Skill name from the catalog",
+            },
+          },
+          required: ["name"],
+        },
+      },
+    },
+  ];
+}
+
+// Returns the raw skill prompt (not JSON) so long instructions survive.
+async function loadSkillTool(name: string): Promise<string> {
+  const skill = await findSkill(name);
+  if (!skill) {
+    const available = (await listSkills())
+      .map((item) => item.name)
+      .join(", ");
+    return `Unknown skill: ${name}.${
+      available
+        ? ` Available: ${available}`
+        : " No skills are defined (pages under ai_assistant/skills/)"
+    }`;
+  }
+  return buildSkillPrompt(skill);
+}
+
 export async function executeLogseqTool(
   name: string,
-  argsJson: string
+  argsJson: string,
+  signal?: AbortSignal
 ): Promise<string> {
   let args: Record<string, unknown> = {};
   try {
@@ -1104,6 +1243,15 @@ export async function executeLogseqTool(
   }
   try {
     switch (name) {
+      case "create_page":
+        return stringify(
+          await createPageTool(
+            String(args.title ?? ""),
+            String(args.first_block ?? ""),
+            Boolean(args.requested),
+            signal
+          )
+        );
       case "search_graph":
         return stringify(await searchGraph(String(args.query ?? "")));
       case "search_tasks":
@@ -1137,6 +1285,11 @@ export async function executeLogseqTool(
             args.limit == null ? undefined : Number(args.limit)
           )
         );
+      case "use_skill": {
+        const skillName = String(args.name ?? "");
+        console.info(`[ai-assistant] use_skill: ${skillName}`);
+        return await loadSkillTool(skillName);
+      }
       case "insert_block":
         return stringify(
           await withCurrentPage((page) =>
