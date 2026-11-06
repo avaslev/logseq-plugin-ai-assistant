@@ -9,14 +9,30 @@ import {
   type ToolCall,
 } from "./llm";
 import {
-  THINKING_TEXT,
   buildSystemPrompt,
   historyFromTree,
   markAssistantContent,
   sanitizeSessionSlug,
+  sentMessagesFromTree,
   toSingleBlockContent,
   type HistoryNode,
 } from "./format";
+import {
+  ASSISTANT_INFO_PREFIX,
+  CANCELLED_TEXT,
+  COMPRESSING_TEXT,
+  EMPTY_REPLY_TEXT,
+  ERROR_PREFIX,
+  THINKING_TEXT,
+} from "./strings";
+import { confirmAction } from "./confirm";
+import { estimateMessagesTokens, estimateTokens } from "./tokens";
+import {
+  createSkillPage,
+  readSystemPromptOverride,
+  buildSkillPrompt,
+  type Skill,
+} from "./skills";
 import {
   executeLogseqTool,
   getLogseqToolSpecs,
@@ -71,6 +87,89 @@ export function getCurrentSessionPage(): string | null {
 
 export function syncCurrentSession(pageName: string | null): void {
   currentSessionPage = pageName;
+}
+
+// --- send state & token usage (F8, F15) --------------------------------------
+
+export type SendPhase = "idle" | "running" | "failed";
+
+export interface StopInfo {
+  kind: "cancelled" | "network" | "rate-limit" | "server" | "error";
+  retryable: boolean;
+  text: string;
+}
+
+export interface SendState {
+  phase: SendPhase;
+  usage: { contextTokens: number; outputTokens: number } | null;
+  failed: StopInfo | null;
+  failedMessage: string | null;
+}
+
+let sendState: SendState = { phase: "idle", usage: null, failed: null, failedMessage: null };
+const sendStateListeners = new Set<(state: SendState) => void>();
+
+export function getSendState(): SendState {
+  return sendState;
+}
+
+export function onSendState(cb: (state: SendState) => void): () => void {
+  sendStateListeners.add(cb);
+  return () => sendStateListeners.delete(cb);
+}
+
+function setSendState(patch: Partial<SendState>): void {
+  sendState = { ...sendState, ...patch };
+  sendStateListeners.forEach((cb) => cb(sendState));
+}
+
+export function clearFailedSend(): void {
+  setSendState({ phase: "idle", failed: null, failedMessage: null });
+}
+
+export function classifyStop(err: unknown, aborted: boolean): StopInfo {
+  if (aborted) {
+    return { kind: "cancelled", retryable: false, text: CANCELLED_TEXT };
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof LlmError) {
+    if (err.status === 0) {
+      return {
+        kind: "network",
+        retryable: true,
+        text: `${ERROR_PREFIX} No connection to the LLM server: ${message}`,
+      };
+    }
+    if (err.status === 429) {
+      return {
+        kind: "rate-limit",
+        retryable: true,
+        text: `${ERROR_PREFIX} Rate limited by the provider: ${message}`,
+      };
+    }
+    if (err.status >= 500) {
+      return {
+        kind: "server",
+        retryable: true,
+        text: `${ERROR_PREFIX} Server error (HTTP ${err.status}): ${message}`,
+      };
+    }
+  }
+  return { kind: "error", retryable: false, text: `${ERROR_PREFIX} ${message}` };
+}
+
+export function getSentMessages(pageName: string): Promise<string[]> {
+  return (async () => {
+    try {
+      const tree =
+        ((await logseq.Editor.getPageBlocksTree(
+          pageName
+        )) as unknown as HistoryNode[]) ?? [];
+      return sentMessagesFromTree(tree);
+    } catch {
+      return [];
+    }
+  })();
 }
 
 export function detectOpenSessionPage(): string | null {
@@ -180,20 +279,33 @@ function isSessionMetaContent(content: string): boolean {
 }
 
 function assistantInfo(text: string): void {
-  void logseq.UI.showMsg(`AI assistant: ${text}`);
+  void logseq.UI.showMsg(`${ASSISTANT_INFO_PREFIX} ${text}`);
 }
 
 const COMPRESS_SYSTEM_PROMPT = [
   "You compress a chat session into a compact summary that will replace the session history.",
   "Keep key facts, decisions, open questions, names and any page/block references.",
   "Drop duplication, small talk and superseded details.",
-  "Reply in the same language as the conversation, with the summary only — no preamble.",
+  "Start the summary with a one-line heading \"Summary of the previous dialogue:\" translated into the language of the conversation.",
+  "Reply with the summary only — no preamble.",
 ].join(" ");
 
 async function removeSession(): Promise<void> {
   const pageName = currentSessionPage;
   if (!pageName) {
     assistantInfo("No active session to remove");
+    return;
+  }
+
+  const confirmed = await confirmAction({
+    title: "Remove session?",
+    description: `${pageName} — the page and all its messages will be deleted permanently.`,
+    confirmLabel: "Delete",
+    cancelLabel: "Cancel",
+    danger: true,
+  });
+  if (!confirmed) {
+    console.info("[ai-assistant] /remove cancelled by user");
     return;
   }
 
@@ -248,7 +360,7 @@ async function compressSession(model: string): Promise<void> {
   try {
     const status = await logseq.Editor.appendBlockInPage(
       pageName,
-      "🗜️ Compressing the session…"
+      COMPRESSING_TEXT
     );
     statusUuid = status ? String((status as { uuid?: unknown }).uuid ?? "") : null;
 
@@ -306,26 +418,23 @@ async function compressSession(model: string): Promise<void> {
 
     await logseq.Editor.appendBlockInPage(
       pageName,
-      markAssistantContent(`Сводка предыдущего диалога:\n${summary}`)
+      markAssistantContent(summary)
     );
     await refreshAnswerBlockRender();
     assistantInfo(`Session compressed: ${removed} blocks → 1 summary block`);
   } catch (err) {
     const aborted = signal.aborted;
-    const message = err instanceof Error ? err.message : String(err);
+    const stop = classifyStop(err, aborted);
     if (statusUuid) {
       try {
-        await logseq.Editor.updateBlock(
-          statusUuid,
-          aborted ? "⏹ Cancelled" : `⚠️ ${message}`
-        );
+        await logseq.Editor.updateBlock(statusUuid, stop.text);
       } catch {
         // status block disappeared; skip the mark
       }
     }
     await refreshAnswerBlockRender();
     if (!aborted) {
-      assistantInfo(`Compression failed: ${message}`);
+      assistantInfo(`Compression failed: ${stop.text}`);
     }
   } finally {
     if (abortController === controller) abortController = null;
@@ -338,7 +447,18 @@ export async function executeSlashCommand(
 ): Promise<void> {
   if (name === "compress") return compressSession(model);
   if (name === "remove") return removeSession();
+  if (name === "skill") return createSkillFlow();
   throw new Error(`Unknown command: /${name}`);
+}
+
+async function createSkillFlow(): Promise<void> {
+  const { page } = await createSkillPage("");
+  try {
+    logseq.App.pushState("page", { name: page });
+  } catch {
+    // navigation is cosmetic; the page exists in the graph anyway
+  }
+  assistantInfo(`Skill page created: ${page}`);
 }
 
 function findSessionMetaBlock(
@@ -499,9 +619,14 @@ export function cleanupAssistantUi(): void {
   }
 }
 
+export interface SendMessageOptions {
+  skill?: Skill | null;
+}
+
 export async function sendMessage(
   content: string,
-  model: string
+  model: string,
+  options?: SendMessageOptions
 ): Promise<void> {
   abortController?.abort();
   const controller = new AbortController();
@@ -509,6 +634,7 @@ export async function sendMessage(
   const signal = controller.signal;
   let thinkingBlock: { uuid: string } | null = null;
   let blockMissing = false;
+  setSendState({ phase: "running" });
 
   try {
     let page = currentSessionPage;
@@ -545,13 +671,25 @@ export async function sendMessage(
       console.warn("[ai-assistant] failed to persist session model:", err);
     }
 
+    const systemOverride = await readSystemPromptOverride();
+    const basePrompt = systemOverride
+      ? `${systemOverride}\n\nToday's date: ${new Date().toISOString().slice(0, 10)}.`
+      : buildSystemPrompt(new Date(), settings.enableWriteTools);
+    const systemPrompt =
+      options?.skill != null
+        ? `${basePrompt}\n\n${buildSkillPrompt(options.skill)}`
+        : basePrompt;
+
     const messages: ChatMessage[] = [
-      {
-        role: "system",
-        content: buildSystemPrompt(new Date(), settings.enableWriteTools),
-      },
+      { role: "system", content: systemPrompt },
       ...history,
     ];
+    setSendState({
+      usage: {
+        contextTokens: estimateMessagesTokens(messages),
+        outputTokens: 0,
+      },
+    });
     const tools = settings.enableTools
       ? [
           ...getLogseqToolSpecs(),
@@ -622,10 +760,19 @@ export async function sendMessage(
       toSingleBlockContent(stripThinkTags(loop.content)) ||
         loop.reasoning.trim()
     );
+    setSendState({
+      phase: "idle",
+      failed: null,
+      failedMessage: null,
+      usage: {
+        contextTokens: estimateMessagesTokens(loop.messages),
+        outputTokens: estimateTokens(loop.content),
+      },
+    });
     if (!replyText) {
       if (thinkingBlock && !blockMissing) {
         try {
-          await logseq.Editor.updateBlock(thinkingBlock.uuid, "(empty reply)");
+          await logseq.Editor.updateBlock(thinkingBlock.uuid, EMPTY_REPLY_TEXT);
         } catch {
           // answer block disappeared; nothing meaningful to write
         }
@@ -656,20 +803,27 @@ export async function sendMessage(
     await refreshAnswerBlockRender();
   } catch (err) {
     const aborted = signal.aborted;
-    const message = err instanceof Error ? err.message : String(err);
+    const stop = classifyStop(err, aborted);
     if (thinkingBlock && !blockMissing) {
       try {
-        await logseq.Editor.updateBlock(
-          thinkingBlock.uuid,
-          aborted ? "⏹ Cancelled" : `⚠️ ${message}`
-        );
+        await logseq.Editor.updateBlock(thinkingBlock.uuid, stop.text);
       } catch {
         // answer block disappeared; skip the status mark
       }
     }
     await refreshAnswerBlockRender();
     if (!aborted) {
-      void logseq.UI.showMsg(`AI assistant: ${message}`, "error");
+      setSendState({
+        phase: "failed",
+        failed: stop,
+        failedMessage: content,
+      });
+      void logseq.UI.showMsg(
+        `${ASSISTANT_INFO_PREFIX} ${stop.text}`,
+        "error"
+      );
+    } else {
+      setSendState({ phase: "idle" });
     }
   } finally {
     if (abortController === controller) abortController = null;

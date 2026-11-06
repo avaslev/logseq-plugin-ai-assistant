@@ -1,10 +1,13 @@
 import "@logseq/libs";
+import { withTimeout } from "./http";
 import type { ToolSpec } from "./llm";
 
 const MAX_TOOL_OUTPUT = 4000;
 const MAX_SEARCH_RESULTS = 15;
 const SEARCH_CACHE_TTL_MS = 15_000;
 const SEARCH_CACHE_MAX = 20;
+const QUERY_TIMEOUT_MS = 5_000;
+const SESSION_PAGE_PREFIX = "ai_assistant/";
 
 // Blocks keep their text in :block/content on file graphs and :block/title on DB graphs.
 const BLOCK_CONTENT_ATTRS = [":block/content", ":block/title"];
@@ -386,6 +389,220 @@ export async function searchTasks(
   return [];
 }
 
+// --- query_blocks (F9): structured read-only queries -------------------------
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
+export interface NormalizedQueryRows {
+  // DSL results arrive as block entities; resolve them to full blocks.
+  entities: BlockEntityMatch[];
+  // Datalog results arrive as tuples; uuid-keyed ones become blocks,
+  // everything else is returned as raw string rows.
+  tuples: unknown[][];
+}
+
+export function normalizeQueryRows(rows: unknown): NormalizedQueryRows {
+  const out: NormalizedQueryRows = { entities: [], tuples: [] };
+  if (!Array.isArray(rows)) return out;
+  const asEntities = rows.filter(
+    (row) => row && typeof row === "object" && !Array.isArray(row)
+  ) as Record<string, unknown>[];
+  if (asEntities.length === rows.length) {
+    for (const entity of asEntities) {
+      const uuid = String(entity.uuid ?? "");
+      if (!uuid) continue;
+      out.entities.push({
+        uuid,
+        content: String(entity.content ?? entity.title ?? ""),
+        marker: normalizeMarker(entity.marker),
+        pageHint: entity.page,
+      });
+    }
+    out.entities = out.entities.slice(0, MAX_SEARCH_RESULTS);
+    return out;
+  }
+  for (const row of rows) {
+    if (Array.isArray(row)) out.tuples.push(row);
+    else out.tuples.push([row]);
+  }
+  return out;
+}
+
+function tuplesToBlocks(tuples: unknown[][]): SearchResult["blocks"] {
+  return tuples
+    .filter(
+      (row) =>
+        typeof row[0] === "string" &&
+        isUuid(String(row[0]))
+    )
+    .map((row) => ({
+      uuid: String(row[0]),
+      content: String(row[1] ?? ""),
+      page: String(row[2] ?? ""),
+      marker: normalizeMarker(row[3]),
+    }))
+    .slice(0, MAX_SEARCH_RESULTS);
+}
+
+export async function queryBlocks(
+  query: string,
+  lang?: string
+): Promise<unknown> {
+  const q = query.trim();
+  if (!q) return { error: "query is required" };
+  const via = lang === "datalog" ? "datalog" : "dsl";
+  try {
+    const raw = await withTimeout(
+      via === "dsl" ? logseq.DB.q(q) : datalog(q),
+      QUERY_TIMEOUT_MS,
+      "Query timed out"
+    );
+    const { entities, tuples } = normalizeQueryRows(raw);
+    if (entities.length > 0) {
+      const blocks = await resolveBlockPages(entities);
+      return { via, blocks };
+    }
+    const blocks = tuplesToBlocks(tuples);
+    if (blocks.length > 0) return { via, blocks };
+    return {
+      via,
+      blocks: [],
+      rows: tuples
+        .slice(0, 10)
+        .map((row) => row.map((cell) => String(cell ?? "").slice(0, 200))),
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- search_journal (F10) ----------------------------------------------------
+
+export function journalDayNumber(date: Date): number {
+  return (
+    date.getFullYear() * 10_000 + (date.getMonth() + 1) * 100 + date.getDate()
+  );
+}
+
+function journalDayFrom(date: Date, days: number): number {
+  const shifted = new Date(date);
+  shifted.setDate(shifted.getDate() - (days - 1));
+  return journalDayNumber(shifted);
+}
+
+export function journalRowsToBlocks(
+  rows: unknown,
+  days: number,
+  now = new Date()
+): Array<SearchResult["blocks"][number] & { day: number }> {
+  const from = journalDayFrom(now, days);
+  return (Array.isArray(rows) ? rows : [])
+    .filter((row) => Array.isArray(row) && isUuid(String(row[0] ?? "")))
+    .map((row) => ({
+      uuid: String(row[0]),
+      content: String(row[1] ?? ""),
+      page: String(row[2] ?? ""),
+      marker: normalizeMarker(row[3]),
+      day: Number(row[4] ?? 0),
+    }))
+    .filter((block) => block.day >= from)
+    .sort((a, b) => b.day - a.day)
+    .slice(0, MAX_SEARCH_RESULTS);
+}
+
+export async function searchJournal(days?: number): Promise<unknown> {
+  const windowDays = Math.min(Math.max(Math.floor(days ?? 7) || 7, 1), 90);
+  for (const attr of BLOCK_CONTENT_ATTRS) {
+    try {
+      const rows = await datalog(
+        `[:find ?uuid ?content ?name ?day :where [?p :block/journal? true] [?p :block/journal-day ?day] [?b :block/page ?p] [?b :block/uuid ?uuid] [?b ${attr} ?content] [?p :block/name ?name]]`
+      );
+      const blocks = journalRowsToBlocks(rows, windowDays, new Date());
+      if (blocks.length > 0) return { via: "datalog", days: windowDays, blocks };
+    } catch (err) {
+      console.warn(
+        `[ai-assistant] journal search (${attr}) failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+  return { via: "datalog", days: windowDays, blocks: [] };
+}
+
+// --- get_recent_pages (F10) --------------------------------------------------
+
+async function getRecentPagesTool(limit?: number): Promise<unknown> {
+  const max = Math.min(Math.max(Math.floor(limit ?? 10) || 10, 1), 25);
+  try {
+    const rows = await datalog(
+      "[:find ?name ?ts :where [?p :block/name ?name] [?p :block/updated-at ?ts]]"
+    );
+    const pages = (Array.isArray(rows) ? rows : [])
+      .map((row) =>
+        Array.isArray(row)
+          ? { name: String(row[0] ?? ""), updatedAt: Number(row[1] ?? 0) }
+          : { name: String(row ?? ""), updatedAt: 0 }
+      )
+      .filter(
+        (page) =>
+          page.name && !page.name.toLowerCase().startsWith(SESSION_PAGE_PREFIX)
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, max);
+    if (pages.length > 0) return { via: "datalog", pages };
+  } catch (err) {
+    console.warn(
+      "[ai-assistant] recent pages (datalog) failed:",
+      err instanceof Error ? err.message : err
+    );
+  }
+  try {
+    const all = await logseq.Editor.getAllPages();
+    if (Array.isArray(all)) {
+      const pages = all
+        .map((page) => {
+          const entity = page as { name?: unknown; updatedAt?: unknown };
+          return {
+            name: String(entity.name ?? ""),
+            updatedAt: Number(entity.updatedAt ?? 0),
+          };
+        })
+        .filter(
+          (page) =>
+            page.name &&
+            !page.name.toLowerCase().startsWith(SESSION_PAGE_PREFIX)
+        )
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, max);
+      return { via: "getAllPages", pages };
+    }
+  } catch (err) {
+    console.warn(
+      "[ai-assistant] recent pages (getAllPages) failed:",
+      err instanceof Error ? err.message : err
+    );
+  }
+  return { via: "none", pages: [] };
+}
+
+// --- get_selected_blocks (F10) ----------------------------------------------
+
+async function getSelectedBlocksTool(): Promise<unknown> {
+  let blocks: unknown;
+  try {
+    blocks = await logseq.Editor.getSelectedBlocks();
+  } catch {
+    return { blocks: [] };
+  }
+  if (!Array.isArray(blocks) || blocks.length === 0) return { blocks: [] };
+  return { blocks: flattenBlocks(blocks as BlockNode[], 20) };
+}
+
 function longestKeyword(query: string): string | null {
   const tokens = query
     .split(/\s+/)
@@ -463,8 +680,6 @@ async function getCurrentPageTool(): Promise<unknown> {
   }
   return result;
 }
-
-const SESSION_PAGE_PREFIX = "ai_assistant/";
 
 interface CurrentPage {
   name: string;
@@ -684,6 +899,73 @@ export function getLogseqToolSpecs(): ToolSpec[] {
         parameters: { type: "object", properties: {} },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "get_selected_blocks",
+        description:
+          "Get the blocks the user currently has selected in the editor. Use it when the user refers to \"this\" or \"the selected\" content.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "query_blocks",
+        description:
+          "Run a structured read-only query against the graph. lang=\"dsl\" (default) uses Logseq's built-in query syntax — the same as {{query}} in the UI — e.g. `(and (task TODO) [[project-x]])` or `(property status active)`. lang=\"datalog\" runs a raw Datascript query over :block/* and :block/page attributes. Prefer dsl unless you need advanced joins.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description:
+                "Query text: a DSL expression or a Datalog vector like [:find ?b :where ...]",
+            },
+            lang: {
+              type: "string",
+              enum: ["dsl", "datalog"],
+              description: "Query language, default: dsl",
+            },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_journal",
+        description:
+          "Read blocks from the user's daily journal pages for the last N days (default 7, max 90). Returns uuid, content, page name and the journal day number.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: {
+              type: "number",
+              description: "How many last days to include, default: 7",
+            },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_recent_pages",
+        description:
+          "List recently updated page names (newest first) with their update timestamps. Use it to orient in what the user has been working on lately.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: {
+              type: "number",
+              description: "Max page names to return, default: 10",
+            },
+          },
+        },
+      },
+    },
   ];
 }
 
@@ -836,6 +1118,25 @@ export async function executeLogseqTool(
         return stringify(await getBlockTool(String(args.uuid ?? "")));
       case "get_current_page":
         return stringify(await getCurrentPageTool());
+      case "get_selected_blocks":
+        return stringify(await getSelectedBlocksTool());
+      case "query_blocks":
+        return stringify(
+          await queryBlocks(
+            String(args.query ?? ""),
+            args.lang == null ? undefined : String(args.lang)
+          )
+        );
+      case "search_journal":
+        return stringify(
+          await searchJournal(args.days == null ? undefined : Number(args.days))
+        );
+      case "get_recent_pages":
+        return stringify(
+          await getRecentPagesTool(
+            args.limit == null ? undefined : Number(args.limit)
+          )
+        );
       case "insert_block":
         return stringify(
           await withCurrentPage((page) =>

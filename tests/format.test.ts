@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   ASSISTANT_MARKER,
+  buildDefaultSystemPromptBody,
   buildSystemPrompt,
   historyFromTree,
   markAssistantContent,
   sanitizeSessionSlug,
+  sentMessagesFromTree,
   toSingleBlockContent,
 } from "../src/format";
+import { THINKING_TEXT } from "../src/strings";
 
 describe("sanitizeSessionSlug", () => {
   it("keeps letters, digits, spaces, dashes and underscores", () => {
@@ -217,7 +220,7 @@ describe("historyFromTree", () => {
     const result = historyFromTree([
       { content: "AI Session\nmodel:: m\nstarted:: now" },
       { content: "q" },
-      { content: "💭 Думаю…" },
+      { content: THINKING_TEXT },
       { content: "  " },
       { content: `${ASSISTANT_MARKER}answer` },
     ]);
@@ -258,5 +261,51 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("[[Page Name]]");
     expect(prompt).toContain("search_graph");
     expect(prompt).toContain("Never output the literal characters backslash+n");
+  });
+
+  it("appends the date line on top of the default body", () => {
+    const body = buildDefaultSystemPromptBody();
+    expect(body).not.toContain("Today's date");
+    expect(buildSystemPrompt(new Date("2026-11-06T00:00:00Z"))).toBe(
+      `${body}\n\nToday's date: 2026-11-06.`
+    );
+  });
+
+  it("includes page editing rules only when write tools are enabled", () => {
+    expect(buildDefaultSystemPromptBody(false)).not.toContain(
+      "Page editing rules"
+    );
+    expect(buildDefaultSystemPromptBody(true)).toContain("Page editing rules");
+  });
+});
+
+describe("sentMessagesFromTree", () => {
+  it("returns only user messages, in order, untruncated", () => {
+    const long = "y".repeat(600);
+    const result = sentMessagesFromTree([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: "first question" },
+      { content: `${ASSISTANT_MARKER}first answer` },
+      { content: THINKING_TEXT },
+      { content: long },
+      { content: `${ASSISTANT_MARKER}answer` },
+    ]);
+    expect(result).toEqual(["first question", long]);
+    expect(result[1].length).toBe(600);
+  });
+
+  it("deduplicates consecutive identical messages", () => {
+    const result = sentMessagesFromTree([
+      { content: "q" },
+      { content: "q" },
+      { content: "other" },
+      { content: "q" },
+    ]);
+    expect(result).toEqual(["q", "other", "q"]);
+  });
+
+  it("tolerates a malformed tree", () => {
+    expect(sentMessagesFromTree(null as unknown as never[])).toEqual([]);
+    expect(sentMessagesFromTree([{ content: null }])).toEqual([]);
   });
 });

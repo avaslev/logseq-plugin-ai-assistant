@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const logseqMock = vi.hoisted(() => ({
   Editor: {
@@ -33,14 +33,21 @@ vi.mock("../src/llm", async (importOriginal) => {
 });
 
 import {
+  cancelGeneration,
+  classifyStop,
+  clearFailedSend,
   executeSlashCommand,
   getCurrentSessionPage,
+  getSendState,
+  getSentMessages,
   isSessionPageFocused,
   persistSessionModel,
   refreshAnswerBlockRender,
+  sendMessage,
   syncCurrentSession,
 } from "../src/chat";
-import { chatCompletion } from "../src/llm";
+import { chatCompletion, LlmError } from "../src/llm";
+import { onConfirmRequest, resolveConfirm } from "../src/confirm";
 
 const chatCompletionMock = vi.mocked(chatCompletion);
 
@@ -315,6 +322,177 @@ describe("executeSlashCommand", () => {
       "status",
       "⚠️ api down"
     );
+    syncCurrentSession(null);
+  });
+});
+
+describe("classifyStop (F15)", () => {
+  it("marks aborts as cancelled", () => {
+    const stop = classifyStop(new Error("anything"), true);
+    expect(stop.kind).toBe("cancelled");
+    expect(stop.retryable).toBe(false);
+    expect(stop.text).toContain("⏹");
+  });
+
+  it("classifies network failures (status 0)", () => {
+    const stop = classifyStop(new LlmError(0, "timed out"), false);
+    expect(stop.kind).toBe("network");
+    expect(stop.retryable).toBe(true);
+    expect(stop.text).toContain("timed out");
+  });
+
+  it("classifies rate limits (status 429)", () => {
+    const stop = classifyStop(new LlmError(429, "slow down"), false);
+    expect(stop.kind).toBe("rate-limit");
+    expect(stop.retryable).toBe(true);
+  });
+
+  it("classifies server errors (status 5xx)", () => {
+    const stop = classifyStop(new LlmError(502, "bad gateway"), false);
+    expect(stop.kind).toBe("server");
+    expect(stop.text).toContain("502");
+  });
+
+  it("falls back to a generic error", () => {
+    const stop = classifyStop(new Error("boom"), false);
+    expect(stop.kind).toBe("error");
+    expect(stop.retryable).toBe(false);
+    expect(stop.text).toContain("boom");
+  });
+});
+
+describe("send state and retry (F15)", () => {
+  beforeEach(() => {
+    clearFailedSend();
+    syncCurrentSession("ai_assistant/20261106_fail");
+  });
+
+  afterEach(() => {
+    clearFailedSend();
+    syncCurrentSession(null);
+  });
+
+  function enableSendFlow(): void {
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      {
+        uuid: "meta",
+        content: "AI Session\nmodel:: m\nstarted:: t",
+        children: [],
+      },
+    ]);
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+  }
+
+  it("exposes the failure and the original message for retry", async () => {
+    enableSendFlow();
+    chatCompletionMock.mockRejectedValue(new LlmError(429, "slow down"));
+
+    await sendMessage("повтори это", "m");
+
+    const state = getSendState();
+    expect(state.phase).toBe("failed");
+    expect(state.failed?.kind).toBe("rate-limit");
+    expect(state.failedMessage).toBe("повтори это");
+    expect(logseqMock.UI.showMsg).toHaveBeenCalled();
+  });
+
+  it("resets to idle after clearFailedSend", () => {
+    clearFailedSend();
+    const state = getSendState();
+    expect(state.phase).toBe("idle");
+    expect(state.failed).toBeNull();
+    expect(state.failedMessage).toBeNull();
+  });
+
+  it("marks a cancelled send as idle without a failure", async () => {
+    enableSendFlow();
+    const abortError = new DOMException("Aborted", "AbortError");
+    chatCompletionMock.mockImplementation(async () => {
+      cancelGeneration();
+      throw abortError;
+    });
+
+    await sendMessage("stop me", "m");
+
+    const state = getSendState();
+    expect(state.phase).toBe("idle");
+    expect(state.failedMessage).toBeNull();
+    expect(logseqMock.Editor.updateBlock).toHaveBeenCalledWith(
+      "thinking",
+      expect.stringContaining("⏹")
+    );
+  });
+
+  it("reports estimated token usage after a successful send", async () => {
+    enableSendFlow();
+    chatCompletionMock.mockResolvedValue({
+      content: "Ответ ассистента",
+      reasoning: "",
+      toolCalls: [],
+    });
+
+    await sendMessage("вопрос", "m");
+
+    const state = getSendState();
+    expect(state.phase).toBe("idle");
+    expect(state.usage).not.toBeNull();
+    expect(state.usage!.contextTokens).toBeGreaterThan(0);
+    expect(state.usage!.outputTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("getSentMessages (F22)", () => {
+  it("returns full-length user messages of the session", async () => {
+    const long = "y".repeat(600);
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: "first question" },
+      { content: "✦ first answer" },
+      { content: "💭 Thinking…" },
+      { content: long },
+    ]);
+    await expect(getSentMessages("page")).resolves.toEqual([
+      "first question",
+      long,
+    ]);
+  });
+
+  it("returns an empty list when the tree is unavailable", async () => {
+    logseqMock.Editor.getPageBlocksTree.mockRejectedValue(new Error("gone"));
+    await expect(getSentMessages("page")).resolves.toEqual([]);
+  });
+});
+
+describe("/remove confirmation (F17)", () => {
+  afterEach(() => {
+    syncCurrentSession(null);
+  });
+
+  it("does not delete the session when the user cancels", async () => {
+    const unsubscribe = onConfirmRequest(() => resolveConfirm(false));
+    syncCurrentSession("ai_assistant/20261106_cancel");
+
+    await executeSlashCommand("remove", "m");
+
+    expect(logseqMock.Editor.deletePage).not.toHaveBeenCalled();
+    expect(getCurrentSessionPage()).toBe("ai_assistant/20261106_cancel");
+    unsubscribe();
+    syncCurrentSession(null);
+  });
+
+  it("deletes the session after confirmation", async () => {
+    const unsubscribe = onConfirmRequest(() => resolveConfirm(true));
+    syncCurrentSession("ai_assistant/20261106_ok");
+    logseqMock.Editor.getPage.mockResolvedValue(null);
+
+    await executeSlashCommand("remove", "m");
+
+    expect(logseqMock.Editor.deletePage).toHaveBeenCalledWith(
+      "ai_assistant/20261106_ok"
+    );
+    expect(getCurrentSessionPage()).toBeNull();
+    unsubscribe();
     syncCurrentSession(null);
   });
 });

@@ -8,7 +8,12 @@ import {
   filterPageNames,
   getLogseqToolSpecs,
   getWriteToolSpecs,
+  journalDayNumber,
+  journalRowsToBlocks,
+  normalizeQueryRows,
+  queryBlocks,
   searchGraph,
+  searchJournal,
   searchTasks,
 } from "../src/logseqTools";
 
@@ -77,13 +82,20 @@ describe("tool specs", () => {
       "get_page_blocks",
       "get_block",
       "get_current_page",
+      "get_selected_blocks",
+      "query_blocks",
+      "search_journal",
+      "get_recent_pages",
     ]);
   });
 
   it("requires arguments for search and lookups", () => {
     for (const spec of specs) {
       if (spec.function.name === "get_current_page") continue;
+      if (spec.function.name === "get_selected_blocks") continue;
       if (spec.function.name === "search_tasks") continue;
+      if (spec.function.name === "search_journal") continue;
+      if (spec.function.name === "get_recent_pages") continue;
       expect(
         (spec.function.parameters.required as string[]).length
       ).toBeGreaterThan(0);
@@ -508,8 +520,8 @@ describe("searchTasks", () => {
       {
         uuid: "t2",
         content: "LATER прочитать",
-        page: "Reading",
         marker: "later",
+        page: "Reading",
       },
     ]);
     expect(datascriptQuery).not.toHaveBeenCalled();
@@ -551,5 +563,265 @@ describe("searchTasks", () => {
     ]);
     expect(datascriptQuery).toHaveBeenCalledTimes(1);
     expect(datascriptQuery.mock.calls[0][0]).toContain(":block/marker");
+  });
+});
+
+describe("queryBlocks (F9)", () => {
+  const uuidA = "a7b40f24-1111-4222-8333-444455556666";
+
+  it("rejects an empty query", async () => {
+    const q = vi.fn();
+    (globalThis as { logseq?: unknown }).logseq = { DB: { q } };
+    const result = await queryBlocks("   ");
+    expect(result).toEqual({ error: "query is required" });
+    expect(q).not.toHaveBeenCalled();
+  });
+
+  it("normalizes DSL entity rows into blocks with page names", async () => {
+    const q = vi.fn().mockResolvedValue([
+      { uuid: uuidA, content: "rating:: 5", marker: "todo", page: 3 },
+    ]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getPage: vi.fn().mockResolvedValue({ name: "Books" }),
+      },
+      DB: { q },
+    };
+    const result = await queryBlocks("(property rating 5)");
+    expect(result).toEqual({
+      via: "dsl",
+      blocks: [
+        { uuid: uuidA, content: "rating:: 5", page: "Books", marker: "todo" },
+      ],
+    });
+    expect(q).toHaveBeenCalledWith("(property rating 5)");
+  });
+
+  it("maps datalog tuples with uuids into blocks", async () => {
+    const datascriptQuery = vi
+      .fn()
+      .mockResolvedValue([[uuidA, "block text", "SomePage", "todo"]]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const result = await queryBlocks(
+      "[:find ?b :where [?b :block/uuid]]",
+      "datalog"
+    );
+    expect(result).toEqual({
+      via: "datalog",
+      blocks: [
+        { uuid: uuidA, content: "block text", page: "SomePage", marker: "todo" },
+      ],
+    });
+  });
+
+  it("returns raw rows for tuples without uuids", async () => {
+    const datascriptQuery = vi
+      .fn()
+      .mockResolvedValue([["count", 42], ["name", "x", 1, 2, 3]]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const result = await queryBlocks("[:find ?x :where ...]", "datalog");
+    expect(result).toEqual({
+      via: "datalog",
+      blocks: [],
+      rows: [
+        ["count", "42"],
+        ["name", "x", "1", "2", "3"],
+      ],
+    });
+  });
+
+  it("reports query errors as strings", async () => {
+    const q = vi.fn().mockRejectedValue(new Error("bad query"));
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn().mockResolvedValue([]) },
+      DB: { q, datascriptQuery: vi.fn() },
+    };
+    const result = await queryBlocks("(broken");
+    expect(result).toEqual({ error: "bad query" });
+  });
+});
+
+describe("normalizeQueryRows", () => {
+  const uuid = "a7b40f24-1111-4222-8333-444455556666";
+
+  it("detects entity rows and slices to the limit", () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      uuid: `${uuid.slice(0, -1)}${i % 10}`,
+      content: `c${i}`,
+    }));
+    const { entities, tuples } = normalizeQueryRows(rows);
+    expect(entities).toHaveLength(15);
+    expect(tuples).toHaveLength(0);
+  });
+
+  it("wraps non-array rows into tuples", () => {
+    const { tuples } = normalizeQueryRows(["a", 42, ["b", 1]]);
+    expect(tuples).toEqual([["a"], [42], ["b", 1]]);
+  });
+
+  it("tolerates non-array input", () => {
+    expect(normalizeQueryRows(null)).toEqual({ entities: [], tuples: [] });
+  });
+});
+
+describe("searchJournal (F10)", () => {
+  const uuid = "a7b40f24-1111-4222-8333-444455556666";
+  const today = journalDayNumber(new Date());
+
+  it("keeps only blocks inside the day window, newest first", () => {
+    const oldDate = new Date();
+    oldDate.setDate(oldDate.getDate() - 30);
+    const blocks = journalRowsToBlocks(
+      [
+        [uuid, "today note", "Nov 6th, 2026", "", today],
+        [uuid, "yesterday note", "Nov 5th, 2026", "", today - 1],
+        [uuid, "old note", "old page", "", journalDayNumber(oldDate)],
+      ],
+      7
+    );
+    expect(blocks.map((block) => block.content)).toEqual([
+      "today note",
+      "yesterday note",
+    ]);
+    expect(blocks[0].day).toBe(today);
+  });
+
+  it("sorts days descending across the window", () => {
+    const d1 = new Date();
+    d1.setDate(d1.getDate() - 3);
+    const d2 = new Date();
+    d2.setDate(d2.getDate() - 1);
+    const blocks = journalRowsToBlocks(
+      [
+        [uuid, "d1", "p", "", journalDayNumber(d1)],
+        [uuid, "d2", "p", "", journalDayNumber(d2)],
+      ],
+      7
+    );
+    expect(blocks.map((block) => block.day)).toEqual([
+      journalDayNumber(d2),
+      journalDayNumber(d1),
+    ]);
+  });
+
+  it("queries journal pages via datalog and returns matching blocks", async () => {
+    const datascriptQuery = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve([]))
+      .mockImplementationOnce(() =>
+        Promise.resolve([[uuid, "journal entry", "Nov 6th, 2026", "", today]])
+      );
+    (globalThis as { logseq?: unknown }).logseq = {
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const result = (await searchJournal(7)) as {
+      via: string;
+      days: number;
+      blocks: unknown[];
+    };
+    expect(result.via).toBe("datalog");
+    expect(result.days).toBe(7);
+    expect(result.blocks).toHaveLength(1);
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/journal?");
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/journal-day");
+  });
+
+  it("clamps the days window and returns an empty result on failures", async () => {
+    const datascriptQuery = vi.fn().mockRejectedValue(new Error("no dsl"));
+    (globalThis as { logseq?: unknown }).logseq = {
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = (await searchJournal(1000)) as { days: number; blocks: unknown[] };
+    expect(result.days).toBe(90);
+    expect(result.blocks).toEqual([]);
+    warnSpy.mockRestore();
+  });
+});
+
+describe("getRecentPages (F10)", () => {
+  it("lists pages by updatedAt via datalog, excluding assistant pages", async () => {
+    const datascriptQuery = vi.fn().mockResolvedValue([
+      ["old-page", 100],
+      ["fresh-page", 300],
+      ["ai_assistant/20261105_test", 999],
+      ["mid-page", 200],
+    ]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages: vi.fn() },
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const result = (await executeLogseqTool("get_recent_pages", "{}")) as string;
+    expect(JSON.parse(result)).toEqual({
+      via: "datalog",
+      pages: [
+        { name: "fresh-page", updatedAt: 300 },
+        { name: "mid-page", updatedAt: 200 },
+        { name: "old-page", updatedAt: 100 },
+      ],
+    });
+    expect(datascriptQuery.mock.calls[0][0]).toContain(":block/updated-at");
+  });
+
+  it("falls back to getAllPages when datalog fails", async () => {
+    const datascriptQuery = vi.fn().mockRejectedValue(new Error("no attr"));
+    const getAllPages = vi.fn().mockResolvedValue([
+      { name: "alpha", updatedAt: 5 },
+      { name: "beta", updatedAt: 50 },
+    ]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getAllPages },
+      DB: { q: vi.fn(), datascriptQuery },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = JSON.parse(
+      (await executeLogseqTool("get_recent_pages", '{"limit": 1}')) as string
+    );
+    expect(result).toEqual({
+      via: "getAllPages",
+      pages: [{ name: "beta", updatedAt: 50 }],
+    });
+    warnSpy.mockRestore();
+  });
+});
+
+describe("get_selected_blocks (F10)", () => {
+  it("returns the selected blocks", async () => {
+    const getSelectedBlocks = vi.fn().mockResolvedValue([
+      { uuid: "u1", content: "selected text" },
+    ]);
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: { getSelectedBlocks },
+    };
+    const result = JSON.parse(
+      (await executeLogseqTool("get_selected_blocks", "{}")) as string
+    );
+    expect(result).toEqual({
+      blocks: [{ uuid: "u1", content: "selected text", children: 0 }],
+    });
+  });
+
+  it("returns an empty list when nothing is selected or the API fails", async () => {
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getSelectedBlocks: vi.fn().mockResolvedValue(null),
+      },
+    };
+    expect(JSON.parse(
+      (await executeLogseqTool("get_selected_blocks", "{}")) as string
+    )).toEqual({ blocks: [] });
+
+    (globalThis as { logseq?: unknown }).logseq = {
+      Editor: {
+        getSelectedBlocks: vi.fn().mockRejectedValue(new Error("blocked")),
+      },
+    };
+    expect(JSON.parse(
+      (await executeLogseqTool("get_selected_blocks", "{}")) as string
+    )).toEqual({ blocks: [] });
   });
 });

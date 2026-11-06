@@ -1,6 +1,14 @@
 import type { ChatMessage } from "./llm";
+import {
+  CANCELLED_TEXT,
+  COMPRESSING_TEXT,
+  EMPTY_REPLY_TEXT,
+  ERROR_PREFIX,
+  THINKING_TEXT,
+} from "./strings";
 
-export const THINKING_TEXT = "💭 Думаю…";
+// Re-exported for backwards compatibility with existing imports.
+export { THINKING_TEXT };
 export const MAX_SLUG_LENGTH = 40;
 
 export interface HistoryNode {
@@ -98,8 +106,8 @@ export function toSingleBlockContent(reply: string): string {
 
 
 const HISTORY_NODE_MAX_LENGTH = 500;
-const SERVICE_BLOCK_PREFIXES = ["⚠️", "⏹"];
-const SERVICE_BLOCK_TEXTS = [THINKING_TEXT, "(empty reply)"];
+const SERVICE_BLOCK_PREFIXES = [ERROR_PREFIX, "⏹"];
+const SERVICE_BLOCK_TEXTS = [THINKING_TEXT, EMPTY_REPLY_TEXT, CANCELLED_TEXT, COMPRESSING_TEXT];
 
 function isServiceBlock(content: string): boolean {
   if (SERVICE_BLOCK_TEXTS.includes(content)) return true;
@@ -139,10 +147,19 @@ export function historyFromTree(tree: HistoryNode[], max = 30): ChatMessage[] {
   return messages.slice(-max);
 }
 
-export function buildSystemPrompt(
-  date = new Date(),
-  enableWriteTools = false
-): string {
+// Full-length (untruncated) user messages of a session, oldest first.
+// Used by the input history navigation (F22).
+export function sentMessagesFromTree(tree: HistoryNode[]): string[] {
+  const out: string[] = [];
+  for (const node of tree ?? []) {
+    const raw = String(node.content ?? "").trim();
+    if (!raw || isServiceBlock(raw) || isSessionMeta(raw)) continue;
+    if (isAssistantContent(raw)) continue;
+    if (out[out.length - 1] !== raw) out.push(raw);
+  }
+  return out;
+}
+export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
   return [
     "You are an AI assistant working inside Logseq, a networked note-taking app.",
     "Your answers are written into the user's graph as Logseq blocks.",
@@ -183,6 +200,15 @@ export function buildSystemPrompt(
           "- After editing, briefly report what changed; do not paste whole edited blocks back unless asked.",
         ]
       : []),
+  ].join("\n");
+}
+
+export function buildSystemPrompt(
+  date = new Date(),
+  enableWriteTools = false
+): string {
+  return [
+    buildDefaultSystemPromptBody(enableWriteTools),
     "",
     `Today's date: ${date.toISOString().slice(0, 10)}.`,
   ].join("\n");

@@ -4,7 +4,8 @@ import React from "react";
 import * as ReactDOM from "react-dom/client";
 import App from "./App";
 import { cleanupAssistantUi, openSessionsPage } from "./chat";
-import { initSettings } from "./settings";
+import { initSettings, getSettings } from "./settings";
+import { ensureSystemPromptPage } from "./skills";
 import "./index.css";
 
 import { logseq as PL } from "../package.json";
@@ -25,6 +26,11 @@ function main() {
   );
 
   initSettings();
+
+  // Seed the user-editable system prompt page on first launch (F18).
+  void ensureSystemPromptPage(getSettings().enableWriteTools).catch(
+    console.error
+  );
 
   window.addEventListener("beforeunload", cleanupAssistantUi);
   logseq.beforeunload(async () => {
