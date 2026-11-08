@@ -206,6 +206,22 @@ describe("historyFromTree", () => {
     ]);
   });
 
+  it("skips leftover agent progress status blocks", () => {
+    const result = historyFromTree([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: "q" },
+      { content: "💭 Request 2/5 → model-a" },
+      { content: "🔧 search_graph: logseq" },
+      { content: "↩️ search_graph: ok · 1.2k" },
+      { content: "⏳ Confirm: Create page?" },
+      { content: `${ASSISTANT_MARKER}answer` },
+    ]);
+    expect(result).toEqual([
+      { role: "user", content: "q" },
+      { role: "assistant", content: "answer" },
+    ]);
+  });
+
   it("limits history to the last N messages", () => {
     const longTree = Array.from({ length: 51 }, (_, i) => ({
       content: i % 2 === 1 ? `${ASSISTANT_MARKER}msg ${i}` : `msg ${i}`,

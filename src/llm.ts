@@ -362,6 +362,11 @@ export async function chatCompletion(
   return acc.result();
 }
 
+export type ToolLoopEvent =
+  | { type: "request"; iteration: number; maxIterations: number }
+  | { type: "tool-start"; call: ToolCall }
+  | { type: "tool-end"; call: ToolCall; ok: boolean; outputLength: number };
+
 export interface ToolLoopOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
@@ -369,6 +374,7 @@ export interface ToolLoopOptions {
   execTool: (call: ToolCall, signal?: AbortSignal) => Promise<string>;
   maxIterations?: number;
   signal?: AbortSignal;
+  onEvent?: (event: ToolLoopEvent) => void;
 }
 
 export interface ToolLoopResult {
@@ -389,6 +395,11 @@ export async function runToolLoop(
 
   while (iterations < maxIterations) {
     opts.signal?.throwIfAborted();
+    opts.onEvent?.({
+      type: "request",
+      iteration: iterations + 1,
+      maxIterations,
+    });
     result = await opts.send(messages);
     iterations += 1;
     if (result.toolCalls.length === 0) break;
@@ -400,6 +411,7 @@ export async function runToolLoop(
     });
     for (const call of result.toolCalls) {
       opts.signal?.throwIfAborted();
+      opts.onEvent?.({ type: "tool-start", call });
       let output: string;
       try {
         output = await opts.execTool(call, opts.signal);
@@ -408,6 +420,12 @@ export async function runToolLoop(
         output = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
       }
       opts.signal?.throwIfAborted();
+      opts.onEvent?.({
+        type: "tool-end",
+        call,
+        ok: !output.startsWith("Tool error:"),
+        outputLength: output.length,
+      });
       messages.push({
         role: "tool",
         tool_call_id: call.id,

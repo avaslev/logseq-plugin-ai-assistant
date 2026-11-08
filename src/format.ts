@@ -107,7 +107,7 @@ export function toSingleBlockContent(reply: string): string {
 
 
 const HISTORY_NODE_MAX_LENGTH = 500;
-const SERVICE_BLOCK_PREFIXES = [ERROR_PREFIX, "⏹"];
+const SERVICE_BLOCK_PREFIXES = [ERROR_PREFIX, "⏹", "💭", "🔧", "↩️", "⏳"];
 const SERVICE_BLOCK_TEXTS = [
   THINKING_TEXT,
   EMPTY_REPLY_TEXT,

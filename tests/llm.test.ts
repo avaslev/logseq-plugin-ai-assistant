@@ -10,6 +10,7 @@ import {
   runToolLoop,
   stripThinkTags,
   type ChatMessage,
+  type ToolLoopEvent,
 } from "../src/llm";
 
 describe("stripThinkTags", () => {
@@ -470,5 +471,75 @@ describe("runToolLoop", () => {
     });
     expect(calls).toBe(5);
     expect(loop.iterations).toBe(5);
+  });
+
+  it("emits request and tool lifecycle events", async () => {
+    const events: ToolLoopEvent[] = [];
+    let round = 0;
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      send: async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            content: "",
+            toolCalls: [
+              {
+                id: "c1",
+                type: "function",
+                function: {
+                  name: "search_graph",
+                  arguments: '{"query":"logseq"}',
+                },
+              },
+            ],
+          };
+        }
+        return { content: "done", toolCalls: [] };
+      },
+      execTool: async () => "12345",
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "request",
+      "tool-start",
+      "tool-end",
+      "request",
+    ]);
+    expect(events[0]).toMatchObject({ iteration: 1, maxIterations: 5 });
+    expect(events[1]).toMatchObject({
+      call: { function: { name: "search_graph" } },
+    });
+    expect(events[2]).toMatchObject({ ok: true, outputLength: 5 });
+    expect(events[3]).toMatchObject({ iteration: 2, maxIterations: 5 });
+    expect(loop.iterations).toBe(2);
+  });
+
+  it("reports tool failures in the tool-end event", async () => {
+    const events: ToolLoopEvent[] = [];
+    await runToolLoop({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "t", arguments: "{}" },
+          },
+        ],
+      }),
+      execTool: async () => {
+        throw new Error("boom");
+      },
+      maxIterations: 1,
+      onEvent: (event) => events.push(event),
+    });
+
+    const end = events.find((event) => event.type === "tool-end");
+    expect(end).toMatchObject({ ok: false });
   });
 });

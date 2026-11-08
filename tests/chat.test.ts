@@ -13,6 +13,7 @@ const logseqMock = vi.hoisted(() => ({
     getPage: vi.fn(),
     getAllPages: vi.fn(),
     getBlock: vi.fn(),
+    createPage: vi.fn(),
   },
   UI: {
     showMsg: vi.fn(),
@@ -38,6 +39,7 @@ import {
   cancelGeneration,
   classifyStop,
   clearFailedSend,
+  describeToolCall,
   executeSlashCommand,
   getCurrentSessionPage,
   getSendState,
@@ -614,6 +616,120 @@ describe("web tools registration (F21)", () => {
     const tools = chatCompletionMock.mock.calls.at(-1)![0].tools ?? [];
     expect(tools.some((t) => t.function.name === "web_search")).toBe(true);
     expect(tools.some((t) => t.function.name === "fetch_page")).toBe(true);
+  });
+});
+
+describe("agent progress status", () => {
+  const meta = {
+    uuid: "meta",
+    content: "AI Session\nmodel:: m\nstarted:: t",
+    children: [],
+  };
+
+  beforeEach(() => {
+    syncCurrentSession("ai_assistant/20261106_status");
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+    logseqMock.Editor.getBlock.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([meta]);
+    logseqMock.Editor.createPage.mockResolvedValue({ uuid: "page-1" });
+  });
+
+  afterEach(() => {
+    syncCurrentSession(null);
+    logseqMock.settings = {};
+  });
+
+  it("summarizes tool arguments for the status line", () => {
+    expect(
+      describeToolCall({
+        id: "t1",
+        type: "function",
+        function: {
+          name: "search_graph",
+          arguments: '{"query":"logseq docs","limit":5}',
+        },
+      })
+    ).toBe("logseq docs");
+    expect(
+      describeToolCall({
+        id: "t2",
+        type: "function",
+        function: { name: "unknown", arguments: '{"foo":"bar"}' },
+      })
+    ).toBe('{"foo":"bar"}');
+    expect(
+      describeToolCall({
+        id: "t3",
+        type: "function",
+        function: { name: "broken", arguments: "not json" },
+      })
+    ).toBe("");
+  });
+
+  it("shows the LLM turn and the running tool in the answer block", async () => {
+    chatCompletionMock
+      .mockResolvedValueOnce({
+        content: "",
+        reasoning: "",
+        toolCalls: [
+          {
+            id: "t1",
+            type: "function",
+            function: { name: "get_current_page", arguments: "{}" },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ content: "Итог", reasoning: "", toolCalls: [] });
+
+    await sendMessage("где я?", "m");
+
+    const writes = logseqMock.Editor.updateBlock.mock.calls.map(
+      (call) => call[1] as string
+    );
+    expect(writes).toContain("💭 Request 1 → m");
+    expect(writes).toContain("🔧 get_current_page");
+    expect(writes.some((text) => text.startsWith("↩️ get_current_page: ok"))).toBe(
+      true
+    );
+    expect(writes.some((text) => text.startsWith("💭 Request 2 → m"))).toBe(
+      true
+    );
+    expect(writes.at(-1)).toContain("Итог");
+  });
+
+  it("shows a pending confirmation while the tool waits", async () => {
+    chatCompletionMock
+      .mockResolvedValueOnce({
+        content: "",
+        reasoning: "",
+        toolCalls: [
+          {
+            id: "t1",
+            type: "function",
+            function: {
+              name: "create_page",
+              arguments: '{"title":"Status page","requested":false}',
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ content: "Готово", reasoning: "", toolCalls: [] });
+
+    const unsubscribe = onConfirmRequest((request) => {
+      if (request) resolveConfirm(true);
+    });
+    try {
+      await sendMessage("создай страницу", "m");
+    } finally {
+      unsubscribe();
+    }
+
+    const writes = logseqMock.Editor.updateBlock.mock.calls.map(
+      (call) => call[1] as string
+    );
+    expect(writes).toContain("⏳ Confirm: Create page?");
+    expect(writes.at(-1)).toContain("Готово");
   });
 });
 

@@ -26,7 +26,7 @@ import {
   THINKING_TEXT,
   TOOL_REPLY_TEXT,
 } from "./strings";
-import { confirmAction } from "./confirm";
+import { confirmAction, onConfirmRequest } from "./confirm";
 import { estimateMessagesTokens, estimateTokens } from "./tokens";
 import {
   buildSkillsCatalog,
@@ -58,6 +58,49 @@ export const SIDEBAR_DEFAULT_WIDTH = 360;
 
 const MAX_HISTORY_BLOCKS_FALLBACK = 30;
 const THINKING_UPDATE_INTERVAL_MS = 1000;
+const TOOL_ARG_PREVIEW_FIELDS = [
+  "query",
+  "url",
+  "status",
+  "page",
+  "title",
+  "uuid",
+  "name",
+  "content",
+];
+const TOOL_ARG_PREVIEW_LIMIT = 60;
+
+function previewText(value: string): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > TOOL_ARG_PREVIEW_LIMIT
+    ? `${flat.slice(0, TOOL_ARG_PREVIEW_LIMIT - 1)}…`
+    : flat;
+}
+
+export function describeToolCall(call: ToolCall): string {
+  let args: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(call.function.arguments || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "";
+    }
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return "";
+  }
+  for (const field of TOOL_ARG_PREVIEW_FIELDS) {
+    const value = args[field];
+    if (typeof value === "string" && value.trim()) {
+      return previewText(value);
+    }
+  }
+  const json = JSON.stringify(args);
+  return json && json !== "{}" ? previewText(json) : "";
+}
+
+function formatChars(length: number): string {
+  return length < 1000 ? String(length) : `${(length / 1000).toFixed(1)}k`;
+}
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -648,6 +691,7 @@ export async function sendMessage(
   const signal = controller.signal;
   let thinkingBlock: { uuid: string } | null = null;
   let blockMissing = false;
+  let unsubscribeConfirm: (() => void) | null = null;
   setSendState({ phase: "running" });
 
   try {
@@ -730,6 +774,7 @@ export async function sendMessage(
 
     let lastUpdate = 0;
     let contentAccum = "";
+    let lastToolStatus = "";
     const updateAnswerBlock = (): void => {
       if (!thinkingBlock || blockMissing) return;
       const now = Date.now();
@@ -746,6 +791,23 @@ export async function sendMessage(
         }
       );
     };
+
+    const setStatus = (text: string): void => {
+      if (!thinkingBlock || blockMissing) return;
+      lastUpdate = 0;
+      void logseq.Editor.updateBlock(thinkingBlock.uuid, text).catch(() => {
+        blockMissing = true;
+        console.warn(
+          "[ai-assistant] answer block was removed; the reply will be written as a new block"
+        );
+      });
+    };
+
+    unsubscribeConfirm = onConfirmRequest((request) => {
+      setStatus(
+        request ? `⏳ Confirm: ${request.title}` : lastToolStatus || THINKING_TEXT
+      );
+    });
 
     const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
       const attempt = (): Promise<ChatResult> =>
@@ -770,6 +832,11 @@ export async function sendMessage(
             : !(err instanceof Error && err.name === "AbortError") &&
               !signal.aborted;
         if (!transient || signal.aborted) throw err;
+        setStatus(
+          err instanceof LlmError && err.status > 0
+            ? `💭 Retrying (HTTP ${err.status})…`
+            : "💭 Retrying (network)…"
+        );
         await abortableDelay(1500, signal);
         return await attempt();
       }
@@ -781,6 +848,27 @@ export async function sendMessage(
       send: sendWithRetry,
       execTool: routeTool,
       signal,
+      onEvent: (event) => {
+        if (event.type === "request") {
+          contentAccum = "";
+          setStatus(
+            `💭 Request ${event.iteration} → ${model}`
+          );
+          return;
+        }
+        const name = event.call.function.name;
+        if (event.type === "tool-start") {
+          const summary = describeToolCall(event.call);
+          lastToolStatus = `🔧 ${name}${summary ? `: ${summary}` : ""}`;
+          setStatus(lastToolStatus);
+          return;
+        }
+        setStatus(
+          `↩️ ${name}: ${event.ok ? "ok" : "failed"} · ${formatChars(
+            event.outputLength
+          )}`
+        );
+      },
     });
 
     const replyText = markAssistantContent(
@@ -858,6 +946,7 @@ export async function sendMessage(
       setSendState({ phase: "idle" });
     }
   } finally {
+    unsubscribeConfirm?.();
     if (abortController === controller) abortController = null;
   }
 }
