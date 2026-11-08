@@ -1,3 +1,10 @@
+# [0.6.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.5.0...v0.6.0) (2026-11-08)
+
+
+### Features
+
+* show agent progress in the answer block ([a6e9677](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/a6e9677e16dd150403de418b645398673a9aa2ac))
+
 # [0.5.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.4.0...v0.5.0) (2026-11-06)
 
 
