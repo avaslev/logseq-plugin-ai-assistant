@@ -1,3 +1,11 @@
+# [0.7.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.6.0...v0.7.0) (2026-11-08)
+
+
+### Features
+
+* auto-tune tool rounds from the model context window (F25) ([bae2d2e](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/bae2d2e8821d611ab587479d10ab0c57f08ac59e))
+* create_drawing tool renders Excalidraw sketches inline ([e44f824](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/e44f824842af86aa9f95e9a5811ee617b629f2b5))
+
 # [0.6.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.5.0...v0.6.0) (2026-11-08)
 
 
