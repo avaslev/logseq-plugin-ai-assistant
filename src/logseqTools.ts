@@ -4,6 +4,7 @@ import { toSingleBlockContent } from "./format";
 import type { ToolSpec } from "./llm";
 import { confirmActionWithSignal } from "./confirm";
 import { buildSkillPrompt, findSkill, listSkills } from "./skills";
+import { createDrawing } from "./draw";
 
 const MAX_TOOL_OUTPUT = 4000;
 const MAX_SEARCH_RESULTS = 15;
@@ -1184,6 +1185,49 @@ export function getWriteToolSpecs(): ToolSpec[] {
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "create_drawing",
+        description:
+          'Create an Excalidraw drawing and embed it into the currently open page as [[draws/<name>.excalidraw]] — an inline editable canvas appears right in the block. Use for quick sketches, flowcharts, mind maps the user asked to draw. Canvas origin is top-left, y grows down, units are px. Plan a readable layout: spread shapes out, add text labels. Pass shapes: [] for an empty canvas.',
+        parameters: {
+          type: "object",
+          properties: {
+            shapes: {
+              type: "array",
+              description:
+                "Shapes to draw. Each shape: {type: rectangle|ellipse|text|arrow, x, y, text?, width?, height?, color?, background?}. text shapes need text (may contain \\n). arrows go from (x,y) to (x2,y2) and need x2,y2. Defaults: rectangle 160x80 at (100,100), ellipse 160x90, color #1e1e1e, background transparent.",
+              items: {
+                type: "object",
+                properties: {
+                  type: {
+                    type: "string",
+                    description: "rectangle | ellipse | text | arrow",
+                  },
+                  text: { type: "string", description: "Text content (text shapes)" },
+                  x: { type: "number", description: "Left coordinate, px" },
+                  y: { type: "number", description: "Top coordinate, px" },
+                  x2: { type: "number", description: "Arrow end x, px" },
+                  y2: { type: "number", description: "Arrow end y, px" },
+                  width: { type: "number", description: "Width, px" },
+                  height: { type: "number", description: "Height, px" },
+                  color: {
+                    type: "string",
+                    description: "Stroke color, e.g. #e03131",
+                  },
+                  background: {
+                    type: "string",
+                    description: "Fill color, e.g. #ffd43b or transparent",
+                  },
+                },
+              },
+            },
+          },
+          required: ["shapes"],
+        },
+      },
+    },
   ];
 }
 
@@ -1347,6 +1391,8 @@ export async function executeLogseqTool(
             )
           )
         );
+      case "create_drawing":
+        return stringify(await createDrawing(args.shapes));
       default:
         return `Unknown tool: ${name}`;
     }

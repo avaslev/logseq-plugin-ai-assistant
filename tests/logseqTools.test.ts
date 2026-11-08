@@ -323,6 +323,7 @@ describe("getWriteToolSpecs", () => {
       "remove_block",
       "move_block",
       "upsert_block_property",
+      "create_drawing",
     ]);
   });
 
