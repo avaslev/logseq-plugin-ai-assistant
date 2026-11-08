@@ -43,6 +43,7 @@ import {
   getWriteToolSpecs,
 } from "./logseqTools";
 import { executeWebTool, getWebToolSpecs, isWebTool } from "./webTools";
+import { computeMaxToolRounds, detectContextWindow } from "./modelInfo";
 import {
   callMcpTool,
   getMcpToolSpecs,
@@ -772,6 +773,17 @@ export async function sendMessage(
         ]
       : [];
 
+    const contextWindow = await detectContextWindow(
+      settings.apiBaseUrl,
+      settings.apiKey,
+      model,
+      signal
+    );
+    const maxToolRounds = computeMaxToolRounds(
+      contextWindow,
+      estimateMessagesTokens(messages)
+    );
+
     let lastUpdate = 0;
     let contentAccum = "";
     let lastToolStatus = "";
@@ -848,6 +860,7 @@ export async function sendMessage(
       send: sendWithRetry,
       execTool: routeTool,
       signal,
+      maxIterations: maxToolRounds,
       onEvent: (event) => {
         if (event.type === "request") {
           contentAccum = "";

@@ -35,6 +35,11 @@ vi.mock("../src/llm", async (importOriginal) => {
   return { ...actual, chatCompletion: vi.fn() };
 });
 
+vi.mock("../src/modelInfo", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/modelInfo")>();
+  return { ...actual, detectContextWindow: vi.fn(async () => 32768) };
+});
+
 import {
   cancelGeneration,
   classifyStop,
