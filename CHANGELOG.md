@@ -1,3 +1,15 @@
+# [0.8.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.7.1...v0.8.0) (2026-11-09)
+
+
+### Bug Fixes
+
+* flatten markdown lists in single-block writes and reasoning fallback ([108a847](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/108a8471261d82d00245de0d67e7cf2ba7216273))
+
+
+### Features
+
+* add insert_outline and create_page.outline for controlled page hierarchy ([f16ef07](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/f16ef07f4080087711c8dab2abe0a288048a0162))
+
 ## [0.7.1](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.7.0...v0.7.1) (2026-11-09)
 
 
