@@ -1,6 +1,11 @@
 import "@logseq/libs";
 import { withTimeout } from "./http";
 import { toSingleBlockContent } from "./format";
+import {
+  OUTLINE_MAX_BLOCKS,
+  parseOutline,
+  type OutlineNode,
+} from "./outline";
 import type { ToolSpec } from "./llm";
 import { confirmActionWithSignal } from "./confirm";
 import { buildSkillPrompt, findSkill, listSkills } from "./skills";
@@ -724,6 +729,77 @@ async function ensureBlockOnCurrentPage(
   return null;
 }
 
+interface InsertedOutlineNode {
+  uuid: string | null;
+  content: string;
+  children: InsertedOutlineNode[];
+}
+
+function parseOutlineForTool(
+  outline: string
+): { nodes?: OutlineNode[]; error?: string } {
+  const parsed = parseOutline(outline);
+  if (parsed.nodes.length === 0) return { error: "outline is required" };
+  if (parsed.blockCount > OUTLINE_MAX_BLOCKS) {
+    return {
+      error: `outline creates ${parsed.blockCount} blocks; the limit is ${OUTLINE_MAX_BLOCKS}. Split it into smaller outlines.`,
+    };
+  }
+  return { nodes: parsed.nodes };
+}
+
+async function insertChildOutline(
+  parentUuid: string,
+  nodes: OutlineNode[]
+): Promise<InsertedOutlineNode[]> {
+  const inserted: InsertedOutlineNode[] = [];
+  let cursor: string | null = null;
+  for (const node of nodes) {
+    const block: { uuid?: unknown } | null = cursor
+      ? await logseq.Editor.insertBlock(cursor, node.content, { sibling: true })
+      : await logseq.Editor.insertBlock(parentUuid, node.content, {
+          sibling: false,
+        });
+    const uuid: string | null = block?.uuid ? String(block.uuid) : null;
+    cursor = uuid;
+    const children = uuid ? await insertChildOutline(uuid, node.children) : [];
+    inserted.push({ uuid, content: node.content, children });
+  }
+  return inserted;
+}
+
+async function insertOutlineNodes(
+  pageRef: string,
+  nodes: OutlineNode[],
+  options: { afterUuid?: string; parentUuid?: string } = {}
+): Promise<InsertedOutlineNode[]> {
+  const inserted: InsertedOutlineNode[] = [];
+  let cursor: string | null = null;
+  for (const node of nodes) {
+    let block: { uuid?: unknown } | null;
+    if (options.parentUuid) {
+      block = cursor
+        ? await logseq.Editor.insertBlock(cursor, node.content, { sibling: true })
+        : await logseq.Editor.insertBlock(options.parentUuid, node.content, {
+            sibling: false,
+          });
+    } else if (options.afterUuid) {
+      block = await logseq.Editor.insertBlock(
+        cursor ?? options.afterUuid,
+        node.content,
+        { sibling: true }
+      );
+    } else {
+      block = await logseq.Editor.appendBlockInPage(pageRef, node.content);
+    }
+    const uuid: string | null = block?.uuid ? String(block.uuid) : null;
+    cursor = uuid;
+    const children = uuid ? await insertChildOutline(uuid, node.children) : [];
+    inserted.push({ uuid, content: node.content, children });
+  }
+  return inserted;
+}
+
 async function insertBlockTool(
   page: CurrentPage,
   content: string,
@@ -764,6 +840,32 @@ async function updateBlockTool(
   if (!normalized) return { error: "content is required" };
   await logseq.Editor.updateBlock(uuid, normalized);
   return { ok: true, uuid };
+}
+
+async function insertOutlineTool(
+  page: CurrentPage,
+  outline: string,
+  afterUuid: string,
+  parentUuid: string
+): Promise<unknown> {
+  if (afterUuid && parentUuid) {
+    return { error: "Use either after_uuid or parent_uuid, not both" };
+  }
+  if (afterUuid) {
+    const err = await ensureBlockOnCurrentPage(afterUuid, page);
+    if (err) return { error: err };
+  }
+  if (parentUuid) {
+    const err = await ensureBlockOnCurrentPage(parentUuid, page);
+    if (err) return { error: err };
+  }
+  const parsed = parseOutlineForTool(outline);
+  if (parsed.error) return { error: parsed.error };
+  const blocks = await insertOutlineNodes(page.uuid, parsed.nodes ?? [], {
+    afterUuid: afterUuid || undefined,
+    parentUuid: parentUuid || undefined,
+  });
+  return { ok: true, page: page.name, blocks };
 }
 
 async function removeBlockTool(
@@ -812,6 +914,7 @@ async function upsertBlockPropertyTool(
 async function createPageTool(
   title: string,
   firstBlock: string,
+  outline: string,
   requested: boolean,
   signal?: AbortSignal
 ): Promise<unknown> {
@@ -823,6 +926,12 @@ async function createPageTool(
       error: `Pages under "${SESSION_PAGE_PREFIX}" are managed by the AI assistant (sessions, skills, system prompt) and cannot be created with create_page`,
     };
   }
+  const hasOutline = outline.trim().length > 0;
+  if (hasOutline && firstBlock.trim()) {
+    return { error: "Provide either first_block or outline, not both" };
+  }
+  const parsedOutline = hasOutline ? parseOutlineForTool(outline) : null;
+  if (parsedOutline?.error) return { error: parsedOutline.error };
 
   // Reuse an existing page instead of duplicating it.
   const existing = (await logseq.Editor.getPage(name)) as {
@@ -866,15 +975,21 @@ async function createPageTool(
     {},
     { redirect: false, createFirstBlock: false }
   )) as { uuid?: unknown } | null;
-  const normalizedBlock = toSingleBlockContent(firstBlock);
-  if (normalizedBlock) {
-    await logseq.Editor.appendBlockInPage(name, normalizedBlock);
+  let blocks: InsertedOutlineNode[] | undefined;
+  if (parsedOutline?.nodes) {
+    blocks = await insertOutlineNodes(name, parsedOutline.nodes);
+  } else {
+    const normalizedBlock = toSingleBlockContent(firstBlock);
+    if (normalizedBlock) {
+      await logseq.Editor.appendBlockInPage(name, normalizedBlock);
+    }
   }
   return {
     ok: true,
     name,
     uuid: page?.uuid ? String(page.uuid) : null,
     created: true,
+    ...(blocks ? { blocks } : {}),
   };
 }
 
@@ -1058,7 +1173,7 @@ export function getWriteToolSpecs(): ToolSpec[] {
       function: {
         name: "create_page",
         description:
-          'Create a new page in the graph. Set requested=true ONLY when the user explicitly asked for a page to be created in their current request. When YOU propose the page yourself, pass requested=false — the user will confirm it in the UI; if they decline, do not retry, continue without the page. An existing page with the same name is reused instead of duplicated.',
+          'Create a new page in the graph. Set requested=true ONLY when the user explicitly asked for a page to be created in their current request. When YOU propose the page yourself, pass requested=false — the user will confirm it in the UI; if they decline, do not retry, continue without the page. An existing page with the same name is reused instead of duplicated. Use outline (not first_block) when the user asked for a structured page with real child blocks.',
         parameters: {
           type: "object",
           properties: {
@@ -1066,7 +1181,12 @@ export function getWriteToolSpecs(): ToolSpec[] {
             first_block: {
               type: "string",
               description:
-                "Optional content of the first block on the new page. Plain text for a SINGLE Logseq block, same format as your answers: # headings are stripped, markdown lists become • bullets, code fences are preserved",
+                "Optional content of a SINGLE flat first block on the new page. # headings are stripped, markdown lists become • bullets, code fences are preserved. Do not combine with outline.",
+            },
+            outline: {
+              type: "string",
+              description:
+                "Optional structured initial page as an indented list, e.g. '- Section\\n  - item\\n    - detail'. Top-level items and one child level become real blocks; deeper items are flattened to • lines. Do not combine with first_block. Use only when the user asked for a structured page/outline.",
             },
             requested: {
               type: "boolean",
@@ -1082,14 +1202,14 @@ export function getWriteToolSpecs(): ToolSpec[] {
       type: "function",
       function: {
         name: "insert_block",
-        description: `Append a new block to the end of the currently open page, or insert one right after a given block uuid. ${WRITE_TOOL_PAGE_NOTE}`,
+        description: `Append one flat block to the end of the currently open page, or insert it right after a given block uuid. Markdown lists are flattened to • inside the block. For real child blocks use insert_outline. ${WRITE_TOOL_PAGE_NOTE}`,
         parameters: {
           type: "object",
           properties: {
             content: {
               type: "string",
               description:
-                "Block content (Markdown). One block per call; use multiple calls for multiple blocks",
+                "Single block content (Markdown). Lists become • bullets and headings are stripped. One block per call; use insert_outline for hierarchy.",
             },
             after_uuid: {
               type: "string",
@@ -1104,12 +1224,44 @@ export function getWriteToolSpecs(): ToolSpec[] {
     {
       type: "function",
       function: {
-        name: "prepend_block",
-        description: `Insert a new block at the top of the currently open page. ${WRITE_TOOL_PAGE_NOTE}`,
+        name: "insert_outline",
+        description: `Insert a structured outline as real nested blocks on the currently open page. Use only when the user asked for a structured page/outline; for a simple list use insert_block. Indent with 2 spaces or a tab. Top-level items and one child level become blocks; deeper items are flattened to • lines. ${WRITE_TOOL_PAGE_NOTE}`,
         parameters: {
           type: "object",
           properties: {
-            content: { type: "string", description: "Block content (Markdown)" },
+            outline: {
+              type: "string",
+              description:
+                "Outline with one item per line, e.g. '- Section\\n  - item\\n    - detail'. Supports -, *, +, 1. and 1) markers.",
+            },
+            after_uuid: {
+              type: "string",
+              description:
+                "Optional block uuid: insert the outline after this block as siblings",
+            },
+            parent_uuid: {
+              type: "string",
+              description:
+                "Optional block uuid: insert the outline as children of this block. Do not combine with after_uuid.",
+            },
+          },
+          required: ["outline"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "prepend_block",
+        description: `Insert one flat block at the top of the currently open page. Markdown lists are flattened to • inside the block. For real child blocks use insert_outline. ${WRITE_TOOL_PAGE_NOTE}`,
+        parameters: {
+          type: "object",
+          properties: {
+            content: {
+              type: "string",
+              description:
+                "Single block content (Markdown). Lists become • bullets and headings are stripped.",
+            },
           },
           required: ["content"],
         },
@@ -1119,14 +1271,15 @@ export function getWriteToolSpecs(): ToolSpec[] {
       type: "function",
       function: {
         name: "update_block",
-        description: `Replace the content of a block on the currently open page. Get the uuid from get_page_blocks or search_graph first. ${WRITE_TOOL_PAGE_NOTE}`,
+        description: `Replace the content of one block on the currently open page. Markdown lists are flattened to • inside the block; this does not create child blocks. Get the uuid from get_page_blocks or search_graph first. ${WRITE_TOOL_PAGE_NOTE}`,
         parameters: {
           type: "object",
           properties: {
             uuid: { type: "string", description: "Block uuid" },
             content: {
               type: "string",
-              description: "New block content (Markdown), replaces the old content entirely",
+              description:
+                "New single-block content (Markdown); lists become • bullets and headings are stripped. Replaces the old content entirely.",
             },
           },
           required: ["uuid", "content"],
@@ -1298,6 +1451,7 @@ export async function executeLogseqTool(
           await createPageTool(
             String(args.title ?? ""),
             String(args.first_block ?? ""),
+            String(args.outline ?? ""),
             Boolean(args.requested),
             signal
           )
@@ -1347,6 +1501,17 @@ export async function executeLogseqTool(
               page,
               String(args.content ?? ""),
               String(args.after_uuid ?? "")
+            )
+          )
+        );
+      case "insert_outline":
+        return stringify(
+          await withCurrentPage((page) =>
+            insertOutlineTool(
+              page,
+              String(args.outline ?? ""),
+              String(args.after_uuid ?? ""),
+              String(args.parent_uuid ?? "")
             )
           )
         );

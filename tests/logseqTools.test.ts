@@ -318,6 +318,7 @@ describe("getWriteToolSpecs", () => {
     expect(names).toEqual([
       "create_page",
       "insert_block",
+      "insert_outline",
       "prepend_block",
       "update_block",
       "remove_block",
@@ -620,6 +621,215 @@ describe("write tools", () => {
     expect(appendBlockInPage).not.toHaveBeenCalled();
   });
 
+  it("insert_outline creates real nested blocks", async () => {
+    const appendBlockInPage = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "n1" })
+      .mockResolvedValueOnce({ uuid: "n4" });
+    const insertBlock = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "n2" })
+      .mockResolvedValueOnce({ uuid: "n3" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({ outline: "- A\n  - a1\n  - a2\n- B" })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(result.blocks).toEqual([
+      {
+        uuid: "n1",
+        content: "A",
+        children: [
+          { uuid: "n2", content: "a1", children: [] },
+          { uuid: "n3", content: "a2", children: [] },
+        ],
+      },
+      { uuid: "n4", content: "B", children: [] },
+    ]);
+    expect(insertBlock).toHaveBeenNthCalledWith(1, "n1", "a1", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(2, "n2", "a2", {
+      sibling: true,
+    });
+  });
+
+  it("insert_outline flattens items deeper than one child level", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "n1" });
+    const insertBlock = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "n2" })
+      .mockResolvedValueOnce({ uuid: "n3" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({ outline: "- A\n  - B\n    - C\n  - D" })
+      )
+    );
+    expect(result.blocks).toEqual([
+      {
+        uuid: "n1",
+        content: "A",
+        children: [
+          { uuid: "n2", content: "B\n• C", children: [] },
+          { uuid: "n3", content: "D", children: [] },
+        ],
+      },
+    ]);
+    expect(insertBlock).toHaveBeenNthCalledWith(1, "n1", "B\n• C", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(2, "n2", "D", {
+      sibling: true,
+    });
+  });
+
+  it("insert_outline collapses a single-child chain", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "n1" });
+    const insertBlock = vi.fn();
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({ outline: "- A\n  - B" })
+      )
+    );
+    expect(result.blocks).toEqual([
+      { uuid: "n1", content: "A\n• B", children: [] },
+    ]);
+    expect(insertBlock).not.toHaveBeenCalled();
+  });
+
+  it("insert_outline inserts after a block", async () => {
+    const insertBlock = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "n1" })
+      .mockResolvedValueOnce({ uuid: "n2" })
+      .mockResolvedValueOnce({ uuid: "n3" })
+      .mockResolvedValueOnce({ uuid: "n4" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({
+          outline: "- A\n  - a1\n  - a2\n- B",
+          after_uuid: "u1",
+        })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(insertBlock).toHaveBeenNthCalledWith(1, "u1", "A", {
+      sibling: true,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(2, "n1", "a1", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(3, "n2", "a2", {
+      sibling: true,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(4, "n1", "B", {
+      sibling: true,
+    });
+  });
+
+  it("insert_outline inserts as children of a block", async () => {
+    const insertBlock = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "n1" })
+      .mockResolvedValueOnce({ uuid: "n2" })
+      .mockResolvedValueOnce({ uuid: "n3" })
+      .mockResolvedValueOnce({ uuid: "n4" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({
+          outline: "- A\n  - a1\n  - a2\n- B",
+          parent_uuid: "u1",
+        })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(insertBlock).toHaveBeenNthCalledWith(1, "u1", "A", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(2, "n1", "a1", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(3, "n2", "a2", {
+      sibling: true,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(4, "n1", "B", {
+      sibling: true,
+    });
+  });
+
+  it("insert_outline rejects after_uuid and parent_uuid together", async () => {
+    const insertBlock = vi.fn();
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({
+          outline: "- A",
+          after_uuid: "u1",
+          parent_uuid: "u2",
+        })
+      )
+    );
+    expect(result.error).toContain("either after_uuid or parent_uuid");
+    expect(insertBlock).not.toHaveBeenCalled();
+  });
+
+  it("insert_outline enforces the block limit", async () => {
+    const appendBlockInPage = vi.fn();
+    const insertBlock = vi.fn();
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+      insertBlock,
+    });
+    const outline = Array.from({ length: 101 }, (_, i) => `- item ${i}`).join(
+      "\n"
+    );
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({ outline })
+      )
+    );
+    expect(result.error).toContain("limit is 100");
+    expect(appendBlockInPage).not.toHaveBeenCalled();
+    expect(insertBlock).not.toHaveBeenCalled();
+  });
+
   it("reports when no page is open", async () => {
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(null),
@@ -634,6 +844,10 @@ describe("write tools", () => {
 describe("create_page tool", () => {
   const createPage = vi.fn();
   const appendBlockInPage = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   function mockForCreate(getPageResult: unknown = null): void {
     createPage.mockResolvedValue({ name: "New Page", uuid: "np-uuid" });
@@ -786,6 +1000,85 @@ describe("create_page tool", () => {
       )
     );
     expect(result.error).toContain("ai_assistant");
+    expect(createPage).not.toHaveBeenCalled();
+  });
+
+  it("creates a structured page from an outline", async () => {
+    const insertBlock = vi
+      .fn()
+      .mockResolvedValueOnce({ uuid: "c2" })
+      .mockResolvedValueOnce({ uuid: "c3" });
+    createPage.mockResolvedValue({ name: "New Page", uuid: "np-uuid" });
+    appendBlockInPage
+      .mockResolvedValueOnce({ uuid: "c1" })
+      .mockResolvedValueOnce({ uuid: "c4" });
+    mockLogseqEditor({
+      getPage: vi.fn().mockResolvedValue(null),
+      createPage,
+      appendBlockInPage,
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        JSON.stringify({
+          title: "New Page",
+          requested: true,
+          outline: "- A\n  - a1\n  - a2\n- B",
+        })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(result.blocks).toEqual([
+      {
+        uuid: "c1",
+        content: "A",
+        children: [
+          { uuid: "c2", content: "a1", children: [] },
+          { uuid: "c3", content: "a2", children: [] },
+        ],
+      },
+      { uuid: "c4", content: "B", children: [] },
+    ]);
+    expect(appendBlockInPage).toHaveBeenNthCalledWith(1, "New Page", "A");
+    expect(appendBlockInPage).toHaveBeenNthCalledWith(2, "New Page", "B");
+    expect(insertBlock).toHaveBeenNthCalledWith(1, "c1", "a1", {
+      sibling: false,
+    });
+    expect(insertBlock).toHaveBeenNthCalledWith(2, "c2", "a2", {
+      sibling: true,
+    });
+  });
+
+  it("rejects both first_block and outline", async () => {
+    mockForCreate(null);
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        JSON.stringify({
+          title: "New Page",
+          requested: true,
+          first_block: "intro",
+          outline: "- A",
+        })
+      )
+    );
+    expect(result.error).toContain("either first_block or outline");
+    expect(createPage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an outline that exceeds the block limit", async () => {
+    mockForCreate(null);
+    const outline = Array.from({ length: 101 }, (_, i) => `- item ${i}`).join(
+      "\n"
+    );
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        JSON.stringify({ title: "New Page", requested: true, outline })
+      )
+    );
+    expect(result.error).toContain("limit is 100");
     expect(createPage).not.toHaveBeenCalled();
   });
 

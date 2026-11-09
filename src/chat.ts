@@ -74,6 +74,7 @@ const TOOL_ARG_PREVIEW_FIELDS = [
   "title",
   "uuid",
   "name",
+  "outline",
   "content",
 ];
 const TOOL_ARG_PREVIEW_LIMIT = 60;
