@@ -8,7 +8,9 @@ import {
   sanitizeSessionSlug,
   sentMessagesFromTree,
   toSingleBlockContent,
+  trimHistoryToBudget,
 } from "../src/format";
+import type { ChatMessage } from "../src/llm";
 import { THINKING_TEXT } from "../src/strings";
 
 describe("sanitizeSessionSlug", () => {
@@ -232,6 +234,18 @@ describe("historyFromTree", () => {
     expect(result[9].content).toBe("msg 50");
   });
 
+  it("keeps long messages intact", () => {
+    const long = "x".repeat(8000);
+    const result = historyFromTree([
+      { content: "AI Session\nmodel:: m\nstarted:: now" },
+      { content: long },
+      { content: `${ASSISTANT_MARKER}${long}` },
+    ]);
+    expect(result).toHaveLength(2);
+    expect(result[0].content).toBe(long);
+    expect(result[1].content).toBe(long);
+  });
+
   it("skips empty and thinking placeholders", () => {
     const result = historyFromTree([
       { content: "AI Session\nmodel:: m\nstarted:: now" },
@@ -265,6 +279,30 @@ describe("historyFromTree", () => {
       { role: "user", content: "q4" },
       { role: "assistant", content: "final answer" },
     ]);
+  });
+});
+
+describe("trimHistoryToBudget", () => {
+  const messages: ChatMessage[] = [
+    { role: "user", content: "a".repeat(400) },
+    { role: "assistant", content: "b".repeat(400) },
+    { role: "user", content: "latest question" },
+  ];
+
+  it("keeps everything when the budget is enough", () => {
+    expect(trimHistoryToBudget(messages, 100_000)).toEqual(messages);
+  });
+
+  it("drops the oldest messages until the estimate fits", () => {
+    const trimmed = trimHistoryToBudget(messages, 20);
+    expect(trimmed).toHaveLength(1);
+    expect(trimmed[0].content).toBe("latest question");
+  });
+
+  it("always keeps the latest message", () => {
+    const trimmed = trimHistoryToBudget(messages, 1);
+    expect(trimmed).toHaveLength(1);
+    expect(trimmed[0].content).toBe("latest question");
   });
 });
 

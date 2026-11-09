@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   FALLBACK_CONTEXT_WINDOW,
+  MAX_RESPONSE_TOKENS,
   MAX_TOOL_ROUNDS,
+  MIN_RESPONSE_TOKENS,
+  computeHistoryBudget,
   computeMaxToolRounds,
+  computeResponseTokenBudget,
   detectContextWindow,
   findLlamaContext,
   findModelContext,
@@ -250,5 +254,27 @@ describe("computeMaxToolRounds", () => {
 
   it("always allows the first request", () => {
     expect(computeMaxToolRounds(32768, 40000)).toBe(1);
+  });
+});
+
+describe("context budgets", () => {
+  it("reserves room for the answer when sizing history", () => {
+    expect(computeHistoryBudget(32768, 4096)).toBe(32768 - 4096 - 2048);
+  });
+
+  it("never returns a negative history budget", () => {
+    expect(computeHistoryBudget(4096, 8000)).toBe(0);
+  });
+
+  it("clamps the response budget to a sane range", () => {
+    expect(computeResponseTokenBudget(32768, 1000)).toBe(8192);
+    expect(computeResponseTokenBudget(8192, 7900)).toBe(MIN_RESPONSE_TOKENS);
+    expect(computeResponseTokenBudget(0, 0)).toBe(MAX_RESPONSE_TOKENS);
+  });
+
+  it("returns the remaining window for mid-sized prompts", () => {
+    expect(computeResponseTokenBudget(32768, 28000)).toBe(
+      32768 - 28000 - 2048
+    );
   });
 });

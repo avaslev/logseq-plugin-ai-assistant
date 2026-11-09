@@ -8,7 +8,9 @@ import { fetchWithTimeout, readResponseText } from "./http";
 
 export const FALLBACK_CONTEXT_WINDOW = 32768;
 export const MAX_TOOL_ROUNDS = 12;
-const ANSWER_RESERVE_TOKENS = 2048;
+export const ANSWER_RESERVE_TOKENS = 2048;
+export const MIN_RESPONSE_TOKENS = 256;
+export const MAX_RESPONSE_TOKENS = 8192;
 const ROUND_COST_TOKENS = 2048;
 const DETECT_TIMEOUT_MS = 2500;
 const CACHE_TTL_MS = 10 * 60 * 1000;
@@ -251,5 +253,31 @@ export function computeMaxToolRounds(
   return Math.max(
     1,
     Math.min(MAX_TOOL_ROUNDS, Math.floor(available / ROUND_COST_TOKENS))
+  );
+}
+
+// Room left for conversation history after the system prompt, tool schemas
+// and the answer reserve.
+export function computeHistoryBudget(
+  contextWindow: number,
+  overheadTokens: number
+): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0;
+  return Math.max(0, contextWindow - overheadTokens - ANSWER_RESERVE_TOKENS);
+}
+
+// Output limit for one request: the rest of the window, clamped so the model
+// neither starves the answer nor generates an absurdly long one.
+export function computeResponseTokenBudget(
+  contextWindow: number,
+  promptTokens: number
+): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return MAX_RESPONSE_TOKENS;
+  }
+  const available = contextWindow - promptTokens - ANSWER_RESERVE_TOKENS;
+  return Math.max(
+    MIN_RESPONSE_TOKENS,
+    Math.min(MAX_RESPONSE_TOKENS, Math.floor(available))
   );
 }

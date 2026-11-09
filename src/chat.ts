@@ -14,7 +14,9 @@ import {
   markAssistantContent,
   sanitizeSessionSlug,
   sentMessagesFromTree,
+  stripAssistantMarker,
   toSingleBlockContent,
+  trimHistoryToBudget,
   type HistoryNode,
 } from "./format";
 import {
@@ -43,7 +45,12 @@ import {
   getWriteToolSpecs,
 } from "./logseqTools";
 import { executeWebTool, getWebToolSpecs, isWebTool } from "./webTools";
-import { computeMaxToolRounds, detectContextWindow } from "./modelInfo";
+import {
+  computeHistoryBudget,
+  computeMaxToolRounds,
+  computeResponseTokenBudget,
+  detectContextWindow,
+} from "./modelInfo";
 import {
   callMcpTool,
   getMcpToolSpecs,
@@ -148,14 +155,29 @@ export interface StopInfo {
   text: string;
 }
 
+export interface Continuation {
+  page: string;
+  blockUuid: string;
+  model: string;
+}
+
 export interface SendState {
   phase: SendPhase;
   usage: { contextTokens: number; outputTokens: number } | null;
   failed: StopInfo | null;
   failedMessage: string | null;
+  // Set when the provider stopped at the output token limit, so the UI can
+  // offer to continue the same reply (F25).
+  continuation: Continuation | null;
 }
 
-let sendState: SendState = { phase: "idle", usage: null, failed: null, failedMessage: null };
+let sendState: SendState = {
+  phase: "idle",
+  usage: null,
+  failed: null,
+  failedMessage: null,
+  continuation: null,
+};
 const sendStateListeners = new Set<(state: SendState) => void>();
 
 export function getSendState(): SendState {
@@ -173,7 +195,12 @@ function setSendState(patch: Partial<SendState>): void {
 }
 
 export function clearFailedSend(): void {
-  setSendState({ phase: "idle", failed: null, failedMessage: null });
+  setSendState({
+    phase: "idle",
+    failed: null,
+    failedMessage: null,
+    continuation: null,
+  });
 }
 
 export function classifyStop(err: unknown, aborted: boolean): StopInfo {
@@ -693,7 +720,12 @@ export async function sendMessage(
   let thinkingBlock: { uuid: string } | null = null;
   let blockMissing = false;
   let unsubscribeConfirm: (() => void) | null = null;
-  setSendState({ phase: "running" });
+  setSendState({
+    phase: "running",
+    failed: null,
+    failedMessage: null,
+    continuation: null,
+  });
 
   try {
     let page = currentSessionPage;
@@ -750,16 +782,6 @@ export async function sendMessage(
       .filter(Boolean)
       .join("\n\n");
 
-    const messages: ChatMessage[] = [
-      { role: "system", content: systemPrompt },
-      ...history,
-    ];
-    setSendState({
-      usage: {
-        contextTokens: estimateMessagesTokens(messages),
-        outputTokens: 0,
-      },
-    });
     const tools = settings.enableTools
       ? [
           ...getLogseqToolSpecs(),
@@ -779,6 +801,24 @@ export async function sendMessage(
       model,
       signal
     );
+    const toolsTokens =
+      tools.length > 0 ? estimateTokens(JSON.stringify(tools)) : 0;
+    const historyBudget = computeHistoryBudget(
+      contextWindow,
+      estimateTokens(systemPrompt) + toolsTokens
+    );
+    const trimmedHistory = trimHistoryToBudget(history, historyBudget);
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...trimmedHistory,
+    ];
+    setSendState({
+      usage: {
+        contextTokens: estimateMessagesTokens(messages),
+        outputTokens: 0,
+      },
+    });
     const maxToolRounds = computeMaxToolRounds(
       contextWindow,
       estimateMessagesTokens(messages)
@@ -822,19 +862,22 @@ export async function sendMessage(
     });
 
     const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
-      const attempt = (): Promise<ChatResult> =>
-        chatCompletion({
+      const attempt = (): Promise<ChatResult> => {
+        const promptTokens = estimateMessagesTokens(msgs) + toolsTokens;
+        return chatCompletion({
           baseUrl: settings.apiBaseUrl,
           apiKey: settings.apiKey,
           model,
           messages: msgs,
           tools,
+          maxTokens: computeResponseTokenBudget(contextWindow, promptTokens),
           signal,
           onDelta: (text) => {
             contentAccum = text;
             updateAnswerBlock();
           },
         });
+      };
       try {
         return await attempt();
       } catch (err) {
@@ -892,6 +935,7 @@ export async function sendMessage(
       phase: "idle",
       failed: null,
       failedMessage: null,
+      continuation: null,
       usage: {
         contextTokens: estimateMessagesTokens(loop.messages),
         outputTokens: estimateTokens(loop.content),
@@ -915,12 +959,14 @@ export async function sendMessage(
     }
 
     let wrote = false;
+    let replyBlockUuid: string | null = null;
     if (thinkingBlock && !blockMissing) {
       try {
         const existing = await logseq.Editor.getBlock(thinkingBlock.uuid);
         if (existing) {
           await logseq.Editor.updateBlock(thinkingBlock.uuid, replyText);
           wrote = true;
+          replyBlockUuid = thinkingBlock.uuid;
         }
       } catch {
         wrote = false;
@@ -930,7 +976,13 @@ export async function sendMessage(
       console.warn(
         "[ai-assistant] answer block is unavailable; writing the reply as a new block"
       );
-      await logseq.Editor.appendBlockInPage(page, replyText);
+      const appended = await logseq.Editor.appendBlockInPage(page, replyText);
+      replyBlockUuid = appended?.uuid ?? null;
+    }
+    if (loop.finishReason === "length" && replyBlockUuid) {
+      setSendState({
+        continuation: { page, blockUuid: replyBlockUuid, model },
+      });
     }
     scrollChatIntoView();
     await refreshAnswerBlockRender();
@@ -960,6 +1012,117 @@ export async function sendMessage(
     }
   } finally {
     unsubscribeConfirm?.();
+    if (abortController === controller) abortController = null;
+  }
+}
+
+const CONTINUE_PROMPT =
+  "Your previous reply was cut off by the output token limit. Continue exactly from where it stopped. Do not repeat text that is already written and do not add a preamble.";
+
+// Appends the rest of a reply that the provider stopped at the output token
+// limit (F25). Works on the same block so the answer stays a single message.
+export async function continueGeneration(): Promise<void> {
+  const continuation = getSendState().continuation;
+  if (!continuation || abortController) return;
+  const settings = getSettings();
+  const controller = new AbortController();
+  abortController = controller;
+  const signal = controller.signal;
+  setSendState({
+    phase: "running",
+    failed: null,
+    failedMessage: null,
+    continuation: null,
+  });
+  try {
+    let tree: HistoryNode[] = [];
+    try {
+      tree =
+        ((await logseq.Editor.getPageBlocksTree(
+          continuation.page
+        )) as unknown as HistoryNode[]) ?? [];
+    } catch {
+      tree = [];
+    }
+    const history = historyFromTree(
+      tree,
+      settings.historyBlocks || MAX_HISTORY_BLOCKS_FALLBACK
+    );
+    const systemOverride = await readSystemPromptOverride();
+    const basePrompt = systemOverride
+      ? `${systemOverride}\n\nToday's date: ${new Date().toISOString().slice(0, 10)}.`
+      : buildSystemPrompt(new Date(), settings.enableWriteTools);
+    const contextWindow = await detectContextWindow(
+      settings.apiBaseUrl,
+      settings.apiKey,
+      continuation.model,
+      signal
+    );
+    const trimmedHistory = trimHistoryToBudget(
+      history,
+      computeHistoryBudget(contextWindow, estimateTokens(basePrompt))
+    );
+    const messages: ChatMessage[] = [
+      { role: "system", content: basePrompt },
+      ...trimmedHistory,
+      { role: "user", content: CONTINUE_PROMPT },
+    ];
+    const promptTokens = estimateMessagesTokens(messages);
+    const result = await chatCompletion({
+      baseUrl: settings.apiBaseUrl,
+      apiKey: settings.apiKey,
+      model: continuation.model,
+      messages,
+      maxTokens: computeResponseTokenBudget(contextWindow, promptTokens),
+      signal,
+    });
+    signal.throwIfAborted();
+    const extra = toSingleBlockContent(stripThinkTags(result.content)).trim();
+    if (extra) {
+      const block = await logseq.Editor.getBlock(continuation.blockUuid);
+      if (block) {
+        const existing = stripAssistantMarker(
+          String(block.content ?? "")
+        ).trim();
+        const merged = markAssistantContent(
+          toSingleBlockContent([existing, extra].filter(Boolean).join("\n"))
+        );
+        await logseq.Editor.updateBlock(continuation.blockUuid, merged);
+      }
+    }
+    setSendState({
+      phase: "idle",
+      failed: null,
+      failedMessage: null,
+      continuation:
+        result.finishReason === "length"
+          ? {
+              page: continuation.page,
+              blockUuid: continuation.blockUuid,
+              model: continuation.model,
+            }
+          : null,
+      usage: {
+        contextTokens: promptTokens,
+        outputTokens: estimateTokens(result.content),
+      },
+    });
+    await refreshAnswerBlockRender();
+    scrollChatIntoView();
+  } catch (err) {
+    const aborted = signal.aborted;
+    const stop = classifyStop(err, aborted);
+    setSendState({
+      phase: "idle",
+      failed: null,
+      failedMessage: null,
+      continuation,
+    });
+    await refreshAnswerBlockRender();
+    if (!aborted) {
+      void logseq.UI.showMsg(`${ASSISTANT_INFO_PREFIX} ${stop.text}`, "error");
+    }
+  } finally {
     if (abortController === controller) abortController = null;
   }
 }

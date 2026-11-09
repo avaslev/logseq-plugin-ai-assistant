@@ -105,6 +105,17 @@ describe("createStreamAccumulator", () => {
     expect(result.content).toBe("Hello");
     expect(deltas).toEqual(["Hel", "Hello"]);
     expect(result.toolCalls).toEqual([]);
+    expect(result.finishReason).toBeNull();
+  });
+
+  it("captures finish_reason from the stream", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(
+      sseEvent({
+        choices: [{ delta: { content: "cut" }, finish_reason: "length" }],
+      })
+    );
+    expect(acc.result().finishReason).toBe("length");
   });
 
   it("accumulates reasoning_content separately from content", () => {
@@ -333,6 +344,28 @@ describe("chatCompletion streaming", () => {
     expect(deltas).toEqual(["Hel", "Hello world"]);
     expect(receivedBodies[0].stream).toBe(true);
     expect(receivedBodies[0].model).toBe("model-a");
+    expect(receivedBodies[0].max_tokens).toBeUndefined();
+  });
+
+  it("sends max_tokens when provided and reports finish_reason", async () => {
+    completionHandler = () => ({
+      status: 200,
+      body:
+        sseEvent({ choices: [{ delta: { content: "partial" } }] }) +
+        sseEvent({
+          choices: [{ delta: {}, finish_reason: "length" }],
+        }) +
+        "data: [DONE]\n\n",
+    });
+    const result = await chatCompletion({
+      baseUrl: baseUrl(),
+      apiKey: "",
+      model: "model-a",
+      messages: [{ role: "user", content: "hi" }],
+      maxTokens: 1024,
+    });
+    expect(receivedBodies[0].max_tokens).toBe(1024);
+    expect(result.finishReason).toBe("length");
   });
 
   it("sends tools only when non-empty", async () => {

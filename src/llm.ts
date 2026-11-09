@@ -31,6 +31,8 @@ export interface ChatResult {
   content: string;
   reasoning: string;
   toolCalls: ToolCall[];
+  // "stop", "length", "tool_calls", etc. as reported by the provider.
+  finishReason?: string | null;
 }
 
 export class LlmError extends Error {
@@ -68,7 +70,7 @@ export function filterChatModels(models: string[]): string[] {
 
 const MODELS_TIMEOUT_MS = 15_000;
 const LLM_CONNECT_TIMEOUT_MS = 30_000;
-const LLM_IDLE_TIMEOUT_MS = 60_000;
+const LLM_IDLE_TIMEOUT_MS = 120_000;
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
@@ -158,6 +160,7 @@ export function createStreamAccumulator(
   let reasoning = "";
   let inThink = false;
   let pending = "";
+  let finishReason: string | null = null;
   const toolCalls = new Map<number, ToolCall>();
 
   const emitVisible = (text: string): void => {
@@ -216,14 +219,23 @@ export function createStreamAccumulator(
             reasoning_content?: unknown;
             tool_calls?: unknown;
           };
+          finish_reason?: unknown;
         }>;
+        done_reason?: unknown;
       };
       try {
         chunk = JSON.parse(payload);
       } catch {
         return;
       }
-      const delta = chunk.choices?.[0]?.delta ?? {};
+      const choice = chunk.choices?.[0];
+      if (typeof choice?.finish_reason === "string" && choice.finish_reason) {
+        finishReason = choice.finish_reason;
+      }
+      if (typeof chunk.done_reason === "string" && chunk.done_reason) {
+        finishReason = chunk.done_reason;
+      }
+      const delta = choice?.delta ?? {};
       const reasoningDelta =
         typeof delta.reasoning_content === "string"
           ? delta.reasoning_content
@@ -276,6 +288,7 @@ export function createStreamAccumulator(
         toolCalls: [...toolCalls.values()].filter(
           (call) => call.function.name.length > 0
         ),
+        finishReason,
       };
     },
   };
@@ -287,6 +300,7 @@ export interface ChatCompletionOptions {
   model: string;
   messages: ChatMessage[];
   tools?: ToolSpec[];
+  maxTokens?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
   idleTimeoutMs?: number;
@@ -308,6 +322,10 @@ export async function chatCompletion(
           model: opts.model,
           messages: opts.messages,
           tools: opts.tools && opts.tools.length > 0 ? opts.tools : undefined,
+          max_tokens:
+            opts.maxTokens && opts.maxTokens > 0
+              ? Math.floor(opts.maxTokens)
+              : undefined,
           stream: true,
         }),
         signal: opts.signal,
@@ -383,6 +401,7 @@ export interface ToolLoopResult {
   reasoning: string;
   toolCalls: ToolCall[];
   iterations: number;
+  finishReason?: string | null;
 }
 
 export async function runToolLoop(
@@ -440,5 +459,6 @@ export async function runToolLoop(
     reasoning: result.reasoning,
     toolCalls: result.toolCalls,
     iterations,
+    finishReason: result.finishReason ?? null,
   };
 }

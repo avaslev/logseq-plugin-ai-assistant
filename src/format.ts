@@ -1,4 +1,5 @@
 import type { ChatMessage } from "./llm";
+import { estimateMessagesTokens } from "./tokens";
 import {
   CANCELLED_TEXT,
   COMPRESSING_TEXT,
@@ -106,7 +107,6 @@ export function toSingleBlockContent(reply: string): string {
 }
 
 
-const HISTORY_NODE_MAX_LENGTH = 500;
 const SERVICE_BLOCK_PREFIXES = [ERROR_PREFIX, "⏹", "💭", "🔧", "↩️", "⏳"];
 const SERVICE_BLOCK_TEXTS = [
   THINKING_TEXT,
@@ -135,23 +135,37 @@ export function historyFromTree(tree: HistoryNode[], max = 30): ChatMessage[] {
     const raw = String(node.content ?? "").trim();
     if (!raw || isServiceBlock(raw) || isSessionMeta(raw)) continue;
     const assistant = isAssistantContent(raw);
-    const content = stripAssistantMarker(raw)
-      .trim()
-      .slice(0, HISTORY_NODE_MAX_LENGTH);
+    const content = stripAssistantMarker(raw).trim();
     if (!content) continue;
     const childTexts = (Array.isArray(node.children)
       ? (node.children as HistoryNode[])
       : []
     )
       .map((child) => stripAssistantMarker(String(child.content ?? "").trim()))
-      .filter((text) => text.length > 0)
-      .map((text) => text.slice(0, HISTORY_NODE_MAX_LENGTH));
+      .filter((text) => text.length > 0);
     const full = childTexts.length
       ? [content, ...childTexts].join("\n")
       : content;
     messages.push({ role: assistant ? "assistant" : "user", content: full });
   }
   return messages.slice(-max);
+}
+
+// Drops the oldest messages until the token estimate fits the budget. The
+// latest message is always kept so the current request is never lost.
+export function trimHistoryToBudget(
+  messages: ChatMessage[],
+  budgetTokens: number
+): ChatMessage[] {
+  if (budgetTokens <= 0 || messages.length <= 1) return messages;
+  let start = 0;
+  while (
+    start < messages.length - 1 &&
+    estimateMessagesTokens(messages.slice(start)) > budgetTokens
+  ) {
+    start += 1;
+  }
+  return start === 0 ? messages : messages.slice(start);
 }
 
 // Full-length (untruncated) user messages of a session, oldest first.
