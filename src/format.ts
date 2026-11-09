@@ -84,7 +84,7 @@ export function toSingleBlockContent(reply: string): string {
     const line = raw.trim();
     if (!line || THINK_FRAGMENT_LINE.test(line)) continue;
 
-    const list = line.match(/^[-*+]\s+(.*)$/);
+    const list = line.match(/^(?:\d{1,3}[.)]|[-*+])\s+(.*)$/);
     if (list) {
       const indent = raw.slice(0, raw.length - raw.trimStart().length);
       lines.push(`${indent}• ${list[1]}`);

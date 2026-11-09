@@ -927,10 +927,9 @@ export async function sendMessage(
       },
     });
 
-    const replyText = markAssistantContent(
-      toSingleBlockContent(stripThinkTags(loop.content)) ||
-        loop.reasoning.trim()
-    );
+    const answer =
+      stripThinkTags(loop.content).trim() || loop.reasoning.trim();
+    const replyText = markAssistantContent(toSingleBlockContent(answer));
     setSendState({
       phase: "idle",
       failed: null,

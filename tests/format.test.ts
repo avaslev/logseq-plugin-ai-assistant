@@ -76,6 +76,22 @@ describe("toSingleBlockContent", () => {
     );
   });
 
+  it("converts ordered list markers to bullets", () => {
+    expect(toSingleBlockContent("1. First\n2) Second\n3. Third")).toBe(
+      "First\n• Second\n• Third"
+    );
+  });
+
+  it("preserves indentation of nested ordered lists", () => {
+    expect(toSingleBlockContent("1. Parent\n  1. Child\n    1. Grandchild")).toBe(
+      "Parent\n  • Child\n    • Grandchild"
+    );
+  });
+
+  it("does not treat years as ordered list markers", () => {
+    expect(toSingleBlockContent("2024. A good year")).toBe("2024. A good year");
+  });
+
   it("keeps fenced code blocks intact", () => {
     const reply = [
       "Example:",

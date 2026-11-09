@@ -549,6 +549,77 @@ describe("write tools", () => {
     expect(upsertBlockProperty).toHaveBeenCalledWith("u1", "status", "done");
   });
 
+  it("insert_block flattens markdown lists into one block", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "new-4" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_block",
+        JSON.stringify({ content: "- a\n- b" })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(appendBlockInPage).toHaveBeenCalledWith(
+      "page-uuid",
+      "a\n• b"
+    );
+  });
+
+  it("prepend_block flattens markdown lists into one block", async () => {
+    const prependBlockInPage = vi.fn().mockResolvedValue({ uuid: "new-5" });
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      prependBlockInPage,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "prepend_block",
+        JSON.stringify({ content: "1. a\n2. b" })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(prependBlockInPage).toHaveBeenCalledWith(
+      "page-uuid",
+      "a\n• b"
+    );
+  });
+
+  it("update_block flattens markdown lists into one block", async () => {
+    const updateBlock = vi.fn().mockResolvedValue(undefined);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      updateBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "update_block",
+        JSON.stringify({ uuid: "u1", content: "- a\n- b" })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(updateBlock).toHaveBeenCalledWith("u1", "a\n• b");
+  });
+
+  it("rejects flat content that normalizes to nothing", async () => {
+    const appendBlockInPage = vi.fn();
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_block",
+        JSON.stringify({ content: "   \n\n  " })
+      )
+    );
+    expect(result.error).toContain("content is required");
+    expect(appendBlockInPage).not.toHaveBeenCalled();
+  });
+
   it("reports when no page is open", async () => {
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(null),

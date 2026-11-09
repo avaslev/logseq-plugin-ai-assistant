@@ -591,6 +591,21 @@ describe("empty reply fallback (tool-aware)", () => {
       "(empty reply)"
     );
   });
+
+  it("normalizes a reasoning-only reply into one block", async () => {
+    chatCompletionMock.mockResolvedValue({
+      content: "",
+      reasoning: "- a\n- b",
+      toolCalls: [],
+    });
+
+    await sendMessage("ответь списком", "m");
+
+    expect(logseqMock.Editor.updateBlock).toHaveBeenCalledWith(
+      "thinking",
+      "✦ a\n• b"
+    );
+  });
 });
 
 describe("web tools registration (F21)", () => {

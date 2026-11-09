@@ -729,16 +729,17 @@ async function insertBlockTool(
   content: string,
   afterUuid: string
 ): Promise<unknown> {
-  if (!content) return { error: "content is required" };
+  const normalized = toSingleBlockContent(content);
+  if (!normalized) return { error: "content is required" };
   if (afterUuid) {
     const err = await ensureBlockOnCurrentPage(afterUuid, page);
     if (err) return { error: err };
-    const block = await logseq.Editor.insertBlock(afterUuid, content, {
+    const block = await logseq.Editor.insertBlock(afterUuid, normalized, {
       sibling: true,
     });
     return { ok: true, uuid: block?.uuid ?? null, insertedAfter: afterUuid };
   }
-  const block = await logseq.Editor.appendBlockInPage(page.uuid, content);
+  const block = await logseq.Editor.appendBlockInPage(page.uuid, normalized);
   return { ok: true, uuid: block?.uuid ?? null, page: page.name };
 }
 
@@ -746,8 +747,9 @@ async function prependBlockTool(
   page: CurrentPage,
   content: string
 ): Promise<unknown> {
-  if (!content) return { error: "content is required" };
-  const block = await logseq.Editor.prependBlockInPage(page.uuid, content);
+  const normalized = toSingleBlockContent(content);
+  if (!normalized) return { error: "content is required" };
+  const block = await logseq.Editor.prependBlockInPage(page.uuid, normalized);
   return { ok: true, uuid: block?.uuid ?? null, page: page.name };
 }
 
@@ -758,7 +760,9 @@ async function updateBlockTool(
 ): Promise<unknown> {
   const err = await ensureBlockOnCurrentPage(uuid, page);
   if (err) return { error: err };
-  await logseq.Editor.updateBlock(uuid, content);
+  const normalized = toSingleBlockContent(content);
+  if (!normalized) return { error: "content is required" };
+  await logseq.Editor.updateBlock(uuid, normalized);
   return { ok: true, uuid };
 }
 
