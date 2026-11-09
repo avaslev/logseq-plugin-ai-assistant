@@ -1,3 +1,10 @@
+## [0.7.1](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.7.0...v0.7.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* stop truncating history and continue replies cut by the token limit (F25) ([ab44ba2](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/ab44ba21e417aaf6f9df8abaee15bbaadb9592fa))
+
 # [0.7.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.6.0...v0.7.0) (2026-11-08)
 
 
