@@ -1,3 +1,10 @@
+# [0.10.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.9.0...v0.10.0) (2026-11-10)
+
+
+### Features
+
+* append_journal writes journal notes without opening pages ([6d290f0](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/6d290f0bbc5e4f7dc00c6db7f7ca6d742c60d391))
+
 # [0.9.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.8.0...v0.9.0) (2026-11-10)
 
 

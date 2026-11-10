@@ -1,6 +1,6 @@
 {
   "name": "logseq-ai-graph-assistant",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "OpenAI-compatible AI agent for Logseq: streaming chat, graph-aware tools and MCP servers, with conversations stored in your graph.",
   "main": "dist/index.html",
   "scripts": {
