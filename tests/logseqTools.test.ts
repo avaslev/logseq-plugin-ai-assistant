@@ -12,6 +12,7 @@ import {
   getWriteToolSpecs,
   journalDayNumber,
   journalRowsToBlocks,
+  parseJournalDate,
   normalizeQueryRows,
   queryBlocks,
   searchGraph,
@@ -317,6 +318,7 @@ describe("getWriteToolSpecs", () => {
   it("declares the write tools", () => {
     expect(names).toEqual([
       "create_page",
+      "append_journal",
       "insert_block",
       "insert_outline",
       "prepend_block",
@@ -1061,6 +1063,155 @@ describe("write tools", () => {
       await executeLogseqTool("insert_block", '{"content":"x"}')
     );
     expect(result.error).toContain("No page is currently open");
+  });
+});
+
+describe("parseJournalDate", () => {
+  const now = new Date(2026, 10, 10);
+
+  it("parses relative days and defaults to today", () => {
+    expect(parseJournalDate("", now)).toBe(20261110);
+    expect(parseJournalDate("today", now)).toBe(20261110);
+    expect(parseJournalDate("  TODAY  ", now)).toBe(20261110);
+    expect(parseJournalDate("yesterday", now)).toBe(20261109);
+    expect(parseJournalDate("tomorrow", now)).toBe(20261111);
+  });
+
+  it("parses ISO dates and rejects the rest", () => {
+    expect(parseJournalDate("2026-01-05", now)).toBe(20260105);
+    expect(parseJournalDate("2026-02-30", now)).toBeNull();
+    expect(parseJournalDate("2026-13-01", now)).toBeNull();
+    expect(parseJournalDate("March 5", now)).toBeNull();
+  });
+});
+
+describe("append_journal tool", () => {
+  function mockJournalDb(datascriptQuery: unknown, editor: Record<string, unknown> = {}): void {
+    (globalThis as { logseq?: unknown }).logseq = {
+      DB: { q: vi.fn(), datascriptQuery },
+      Editor: editor,
+    };
+  }
+
+  it("appends a note to the journal page without the page being open", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "j1" });
+    const getCurrentPage = vi.fn();
+    mockJournalDb(vi.fn().mockResolvedValue([["2026-11-10", "j-uuid"]]), {
+      getCurrentPage,
+      appendBlockInPage,
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "j1",
+        content: "buy milk",
+        page: { id: 1 },
+      }),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        '{"date":"2026-11-10","content":"buy milk"}'
+      )
+    );
+    expect(result).toEqual({
+      ok: true,
+      page: "2026-11-10",
+      uuid: "j1",
+      content: "buy milk",
+      day: 20261110,
+    });
+    expect(appendBlockInPage).toHaveBeenCalledWith("j-uuid", "buy milk");
+    expect(getCurrentPage).not.toHaveBeenCalled();
+  });
+
+  it("flattens markdown lists in journal notes", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "j2" });
+    mockJournalDb(vi.fn().mockResolvedValue([["2026-11-10", "j-uuid"]]), {
+      appendBlockInPage,
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "j2",
+        content: "a\n• b",
+        page: { id: 1 },
+      }),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        JSON.stringify({ date: "today", content: "- a\n- b" })
+      )
+    );
+    expect(result.content).toBe("a\n• b");
+    expect(appendBlockInPage).toHaveBeenCalledWith("j-uuid", "a\n• b");
+  });
+
+  it("creates the journal page when it does not exist yet", async () => {
+    const datascriptQuery = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([["2026-11-11", "j3"]]);
+    const createPage = vi.fn().mockResolvedValue({ uuid: "p3" });
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "j3" });
+    mockJournalDb(datascriptQuery, {
+      createPage,
+      appendBlockInPage,
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "j3",
+        content: "plan the day",
+        page: { id: 1 },
+      }),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        '{"date":"2026-11-11","content":"plan the day"}'
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(result.page).toBe("2026-11-11");
+    expect(createPage).toHaveBeenCalledWith("2026-11-11", {}, {
+      redirect: false,
+      createFirstBlock: false,
+      journal: true,
+    });
+    expect(appendBlockInPage).toHaveBeenCalledWith("j3", "plan the day");
+  });
+
+  it("reports an error when the journal page cannot be created", async () => {
+    const datascriptQuery = vi.fn().mockResolvedValue([]);
+    mockJournalDb(datascriptQuery, {
+      createPage: vi.fn().mockResolvedValue(null),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        '{"date":"2026-11-11","content":"x"}'
+      )
+    );
+    expect(result.error).toContain("could not be created");
+    expect(result.error).toContain("NOT made");
+  });
+
+  it("rejects an invalid date", async () => {
+    mockJournalDb(vi.fn());
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        '{"date":"March 5","content":"x"}'
+      )
+    );
+    expect(result.error).toContain("invalid date");
+  });
+
+  it("reports an error when the block cannot be read back", async () => {
+    mockJournalDb(vi.fn().mockResolvedValue([["2026-11-10", "j-uuid"]]), {
+      appendBlockInPage: vi.fn().mockResolvedValue(null),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "append_journal",
+        '{"date":"2026-11-10","content":"x"}'
+      )
+    );
+    expect(result.error).toContain("append failed");
+    expect(result.ok).toBeUndefined();
   });
 });
 

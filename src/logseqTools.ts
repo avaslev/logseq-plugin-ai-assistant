@@ -504,6 +504,45 @@ function journalDayFrom(date: Date, days: number): number {
   return journalDayNumber(shifted);
 }
 
+export function journalDateIso(day: number): string {
+  const year = Math.floor(day / 10_000);
+  const month = Math.floor((day % 10_000) / 100);
+  const date = Math.floor(day % 100);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${year}-${pad(month)}-${pad(date)}`;
+}
+
+const JOURNAL_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+// Accepts today (default), yesterday, tomorrow and YYYY-MM-DD in the
+// graph-local time. Returns the Logseq journal-day number (YYYYMMDD).
+export function parseJournalDate(input: string, now = new Date()): number | null {
+  const value = input.trim().toLowerCase();
+  const date = new Date(now);
+  if (!value || value === "today") return journalDayNumber(date);
+  if (value === "yesterday") {
+    date.setDate(date.getDate() - 1);
+    return journalDayNumber(date);
+  }
+  if (value === "tomorrow") {
+    date.setDate(date.getDate() + 1);
+    return journalDayNumber(date);
+  }
+  if (JOURNAL_DATE_PATTERN.test(value)) {
+    const [year, month, day] = value.split("-").map(Number);
+    const parsed = new Date(year, month - 1, day);
+    if (
+      parsed.getFullYear() !== year ||
+      parsed.getMonth() !== month - 1 ||
+      parsed.getDate() !== day
+    ) {
+      return null;
+    }
+    return journalDayNumber(parsed);
+  }
+  return null;
+}
+
 export function journalRowsToBlocks(
   rows: unknown,
   days: number,
@@ -1021,6 +1060,67 @@ async function upsertBlockPropertyTool(
   return { ok: true, uuid, key, page: page.name, content: written.content };
 }
 
+async function findJournalPage(
+  day: number
+): Promise<{ name: string; uuid: string } | null> {
+  const rows = await datalog(
+    `[:find ?name ?uuid :where [?p :block/journal? true] [?p :block/journal-day ?day] [(= ?day ${day})] [?p :block/name ?name] [?p :block/uuid ?uuid]]`
+  );
+  if (!Array.isArray(rows)) return null;
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const name = String(row[0] ?? "");
+    const uuid = String(row[1] ?? "");
+    if (name && uuid) return { name, uuid };
+  }
+  return null;
+}
+
+// Journal notes are the one write that must not require the target page to be
+// open: on the journals overview no page is active at all.
+async function appendJournalTool(
+  date: string,
+  content: string
+): Promise<unknown> {
+  const day = parseJournalDate(date);
+  if (day == null) {
+    return {
+      error:
+        "invalid date: use today, yesterday, tomorrow or YYYY-MM-DD (e.g. 2026-11-10)",
+    };
+  }
+  const normalized = toSingleBlockContent(content);
+  if (!normalized) return { error: "content is required" };
+  let page = await findJournalPage(day);
+  if (!page) {
+    try {
+      await logseq.Editor.createPage(journalDateIso(day), {}, {
+        redirect: false,
+        createFirstBlock: false,
+        journal: true,
+      });
+    } catch {
+      // fall through to the re-check below
+    }
+    page = await findJournalPage(day);
+  }
+  if (!page) {
+    return {
+      error: `journal page for ${journalDateIso(day)} does not exist and could not be created. The change was NOT made. Ask the user to open that day's journal once, then retry`,
+    };
+  }
+  const block = await logseq.Editor.appendBlockInPage(page.uuid, normalized);
+  const uuid = block?.uuid ? String(block.uuid) : null;
+  const written = await readBlockAfterWrite(uuid);
+  if (!written) {
+    return {
+      error:
+        "append failed: Logseq did not create the block. The change was NOT made",
+    };
+  }
+  return { ok: true, page: page.name, uuid, content: written.content, day };
+}
+
 // --- create_page (user-requested or agent-proposed with consent) ------------
 
 async function createPageTool(
@@ -1320,6 +1420,30 @@ export function getWriteToolSpecs(): ToolSpec[] {
     {
       type: "function",
       function: {
+        name: "append_journal",
+        description:
+          "Append a note to a journal page by date WITHOUT needing that page to be open. Use for requests like 'add a note to today's journal' or 'add a note to 2026-11-10' — even when the user is on another page or on the journals overview. The note is a single flat block; markdown lists become • bullets.",
+        parameters: {
+          type: "object",
+          properties: {
+            date: {
+              type: "string",
+              description:
+                "Journal day: today (default), yesterday, tomorrow or YYYY-MM-DD",
+            },
+            content: {
+              type: "string",
+              description:
+                "Single block content (Markdown). Lists become • bullets and headings are stripped.",
+            },
+          },
+          required: ["content"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "insert_block",
         description: `Append one flat block to the end of the currently open page, or insert it right after a given block uuid. Markdown lists are flattened to • inside the block. For real child blocks use insert_outline. ${WRITE_TOOL_PAGE_NOTE}`,
         parameters: {
@@ -1613,6 +1737,13 @@ export async function executeLogseqTool(
         console.info(`[ai-assistant] use_skill: ${skillName}`);
         return await loadSkillTool(skillName);
       }
+      case "append_journal":
+        return stringify(
+          await appendJournalTool(
+            String(args.date ?? ""),
+            String(args.content ?? "")
+          )
+        );
       case "insert_block":
         return stringify(
           await withCurrentPage((page) =>
