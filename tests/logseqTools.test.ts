@@ -417,11 +417,19 @@ describe("write tools", () => {
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
       appendBlockInPage,
+      getBlock: vi
+        .fn()
+        .mockResolvedValue({ uuid: "new-1", content: "hello", page: { id: 42 } }),
     });
     const result = JSON.parse(
       await executeLogseqTool("insert_block", '{"content":"hello"}')
     );
-    expect(result).toEqual({ ok: true, uuid: "new-1", page: "projects" });
+    expect(result).toEqual({
+      ok: true,
+      uuid: "new-1",
+      page: "projects",
+      content: "hello",
+    });
     expect(appendBlockInPage).toHaveBeenCalledWith("page-uuid", "hello");
   });
 
@@ -435,6 +443,9 @@ describe("write tools", () => {
           page: { name: "projects", uuid: "page-uuid", id: 42 },
         }),
       appendBlockInPage,
+      getBlock: vi
+        .fn()
+        .mockResolvedValue({ uuid: "new-2", content: "x", page: { id: 42 } }),
     });
     const result = JSON.parse(
       await executeLogseqTool("insert_block", '{"content":"x"}')
@@ -447,7 +458,11 @@ describe("write tools", () => {
     const insertBlock = vi.fn().mockResolvedValue({ uuid: "new-3" });
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
-      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "u1",
+        content: "x",
+        page: { id: 42 },
+      }),
       insertBlock,
     });
     const result = JSON.parse(
@@ -456,7 +471,13 @@ describe("write tools", () => {
         '{"content":"x","after_uuid":"u1"}'
       )
     );
-    expect(result).toEqual({ ok: true, uuid: "new-3", insertedAfter: "u1" });
+    expect(result).toEqual({
+      ok: true,
+      uuid: "new-3",
+      insertedAfter: "u1",
+      page: "projects",
+      content: "x",
+    });
     expect(insertBlock).toHaveBeenCalledWith("u1", "x", { sibling: true });
   });
 
@@ -500,7 +521,11 @@ describe("write tools", () => {
     const updateBlock = vi.fn().mockResolvedValue(undefined);
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
-      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "u1",
+        content: "new text",
+        page: { id: 42 },
+      }),
       updateBlock,
     });
     const result = JSON.parse(
@@ -509,7 +534,12 @@ describe("write tools", () => {
         '{"uuid":"u1","content":"new text"}'
       )
     );
-    expect(result).toEqual({ ok: true, uuid: "u1" });
+    expect(result).toEqual({
+      ok: true,
+      uuid: "u1",
+      page: "projects",
+      content: "new text",
+    });
     expect(updateBlock).toHaveBeenCalledWith("u1", "new text");
   });
 
@@ -537,7 +567,11 @@ describe("write tools", () => {
     const upsertBlockProperty = vi.fn().mockResolvedValue(undefined);
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
-      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "u1",
+        content: "status:: done",
+        page: { id: 42 },
+      }),
       upsertBlockProperty,
     });
     const result = JSON.parse(
@@ -546,7 +580,13 @@ describe("write tools", () => {
         '{"uuid":"u1","key":"status","value":"done"}'
       )
     );
-    expect(result).toEqual({ ok: true, uuid: "u1", key: "status" });
+    expect(result).toEqual({
+      ok: true,
+      uuid: "u1",
+      key: "status",
+      page: "projects",
+      content: "status:: done",
+    });
     expect(upsertBlockProperty).toHaveBeenCalledWith("u1", "status", "done");
   });
 
@@ -555,6 +595,11 @@ describe("write tools", () => {
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
       appendBlockInPage,
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "new-4",
+        content: "a\n• b",
+        page: { id: 42 },
+      }),
     });
     const result = JSON.parse(
       await executeLogseqTool(
@@ -574,6 +619,11 @@ describe("write tools", () => {
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
       prependBlockInPage,
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "new-5",
+        content: "a\n• b",
+        page: { id: 42 },
+      }),
     });
     const result = JSON.parse(
       await executeLogseqTool(
@@ -592,7 +642,11 @@ describe("write tools", () => {
     const updateBlock = vi.fn().mockResolvedValue(undefined);
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
-      getBlock: vi.fn().mockResolvedValue({ uuid: "u1", page: { id: 42 } }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "u1",
+        content: "a\n• b",
+        page: { id: 42 },
+      }),
       updateBlock,
     });
     const result = JSON.parse(
@@ -828,6 +882,175 @@ describe("write tools", () => {
     expect(result.error).toContain("limit is 100");
     expect(appendBlockInPage).not.toHaveBeenCalled();
     expect(insertBlock).not.toHaveBeenCalled();
+  });
+
+  it("insert_block reports an error when Logseq returns no block", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue(null);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("insert_block", '{"content":"x"}')
+    );
+    expect(result.error).toContain("insert failed");
+    expect(result.error).toContain("NOT made");
+  });
+
+  it("insert_block reports an error when the block cannot be read back", async () => {
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage: vi.fn().mockResolvedValue({ uuid: "new-6" }),
+      getBlock: vi.fn().mockResolvedValue(null),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("insert_block", '{"content":"x"}')
+    );
+    expect(result.error).toContain("insert failed");
+    expect(result.ok).toBeUndefined();
+  });
+
+  it("update_block reports an error when the block disappears", async () => {
+    const updateBlock = vi.fn().mockResolvedValue(undefined);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi
+        .fn()
+        .mockResolvedValueOnce({ uuid: "u1", page: { id: 42 } })
+        .mockResolvedValueOnce(null),
+      updateBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "update_block",
+        '{"uuid":"u1","content":"new text"}'
+      )
+    );
+    expect(result.error).toContain("update failed");
+    expect(updateBlock).toHaveBeenCalledWith("u1", "new text");
+  });
+
+  it("remove_block verifies the block is gone", async () => {
+    const removeBlock = vi.fn().mockResolvedValue(undefined);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi
+        .fn()
+        .mockResolvedValueOnce({ uuid: "u1", page: { id: 42 } })
+        .mockResolvedValueOnce(null),
+      removeBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("remove_block", '{"uuid":"u1"}')
+    );
+    expect(result).toEqual({ ok: true, removed: "u1", page: "projects" });
+  });
+
+  it("remove_block reports an error when the block survives", async () => {
+    const removeBlock = vi.fn().mockResolvedValue(undefined);
+    const block = { uuid: "u1", page: { id: 42 } };
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi.fn().mockResolvedValue(block),
+      removeBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("remove_block", '{"uuid":"u1"}')
+    );
+    expect(result.error).toContain("remove failed");
+    expect(result.error).toContain("NOT made");
+  });
+
+  it("move_block verifies the block became a child", async () => {
+    const moveBlock = vi.fn().mockResolvedValue(undefined);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi
+        .fn()
+        .mockResolvedValueOnce({ uuid: "u1", page: { id: 42 } })
+        .mockResolvedValueOnce({ uuid: "u2", page: { id: 42 } })
+        .mockResolvedValueOnce({ uuid: "u1", page: { id: 42 }, parent: { id: 77 } })
+        .mockResolvedValueOnce({ id: 77, uuid: "u2", page: { id: 42 } }),
+      moveBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "move_block",
+        '{"uuid":"u1","target_uuid":"u2","as_child":true}'
+      )
+    );
+    expect(result).toEqual({
+      ok: true,
+      moved: "u1",
+      target: "u2",
+      page: "projects",
+    });
+  });
+
+  it("move_block reports an error when the block is not a child", async () => {
+    const moveBlock = vi.fn().mockResolvedValue(undefined);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      getBlock: vi
+        .fn()
+        .mockResolvedValueOnce({ uuid: "u1", page: { id: 42 } })
+        .mockResolvedValueOnce({ uuid: "u2", page: { id: 42 } })
+        .mockResolvedValueOnce({
+          uuid: "u1",
+          page: { id: 42 },
+          parent: { id: 99 },
+        })
+        .mockResolvedValueOnce({ id: 77, uuid: "u2", page: { id: 42 } }),
+      moveBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "move_block",
+        '{"uuid":"u1","target_uuid":"u2","as_child":true}'
+      )
+    );
+    expect(result.error).toContain("did not become a child");
+  });
+
+  it("insert_outline reports a partial failure", async () => {
+    const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "n1" });
+    const insertBlock = vi.fn().mockResolvedValue(null);
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage,
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "insert_outline",
+        JSON.stringify({ outline: "- A\n  - a1\n  - a2" })
+      )
+    );
+    expect(result.error).toContain("partially applied");
+    expect(result.ok).toBeUndefined();
+  });
+
+  it("create_page reports a warning for a partially applied outline", async () => {
+    const insertBlock = vi.fn().mockResolvedValue(null);
+    mockLogseqEditor({
+      getPage: vi.fn().mockResolvedValue(null),
+      createPage: vi.fn().mockResolvedValue({ name: "New Page", uuid: "np-uuid" }),
+      appendBlockInPage: vi.fn().mockResolvedValue({ uuid: "c1" }),
+      insertBlock,
+    });
+    const result = JSON.parse(
+      await executeLogseqTool(
+        "create_page",
+        JSON.stringify({
+          title: "New Page",
+          requested: true,
+          outline: "- A\n  - a1\n  - a2",
+        })
+      )
+    );
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("partially applied");
+    expect(result.blocks).toBeUndefined();
   });
 
   it("reports when no page is open", async () => {

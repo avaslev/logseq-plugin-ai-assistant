@@ -220,6 +220,8 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
           "- Newlines inside the content parameter are line breaks within that same block, not new blocks.",
           "- Use insert_outline only when the user asked for a structured page/outline. It creates real child blocks for top-level items and one child level; deeper items become • lines.",
           "- Do not over-nest: for a simple list prefer one flat block with • lines. Hierarchy is for real sections and sub-items, not for every bullet.",
+          "- A write tool returning ok means the change happened; a tool returning an error means NOTHING changed. If an edit fails, tell the user what failed — never claim success.",
+          "- Report page edits based on the content the write tool returns, not on what you intended to write.",
           "- For destructive actions (remove_block, move_block) describe what you are about to change and confirm with the user first if the request is ambiguous.",
           "- After editing, briefly report what changed; do not paste whole edited blocks back unless asked.",
           "",

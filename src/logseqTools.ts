@@ -698,7 +698,8 @@ interface CurrentPage {
 
 async function resolveCurrentPage(): Promise<CurrentPage | string> {
   const entity = await logseq.Editor.getCurrentPage();
-  if (!entity) return "No page is currently open in the main editor";
+  if (!entity)
+    return "No page is currently open in the main editor. The change was NOT made. Ask the user to open the target page in the main editor, then retry";
   const entityRecord = entity as {
     name?: string;
     uuid?: string;
@@ -724,9 +725,33 @@ async function ensureBlockOnCurrentPage(
   if (!block) return `Block "${uuid}" not found`;
   const blockPageId = (block as { page?: { id?: number } }).page?.id;
   if (blockPageId !== page.id) {
-    return `Block "${uuid}" is not on the current page "${page.name}". Write tools only work on the page you currently have open`;
+    return `Block "${uuid}" is not on the current page "${page.name}". Write tools only work on the page you currently have open. The change was NOT made. Ask the user to open the target page in the main editor, then retry`;
   }
   return null;
+}
+
+const WRITE_CONTENT_PREVIEW_LENGTH = 200;
+
+// Re-reads a block right after a write so tool results reflect the graph
+// state instead of the model's intention. Returns null when the block is
+// missing, which callers turn into an explicit error.
+async function readBlockAfterWrite(
+  uuid: string | null
+): Promise<{ content: string } | null> {
+  if (!uuid) return null;
+  try {
+    const block = await logseq.Editor.getBlock(uuid);
+    if (!block) return null;
+    const content = String((block as { content?: unknown }).content ?? "");
+    return {
+      content:
+        content.length > WRITE_CONTENT_PREVIEW_LENGTH
+          ? `${content.slice(0, WRITE_CONTENT_PREVIEW_LENGTH)}…`
+          : content,
+    };
+  } catch {
+    return null;
+  }
 }
 
 interface InsertedOutlineNode {
@@ -748,10 +773,15 @@ function parseOutlineForTool(
   return { nodes: parsed.nodes };
 }
 
+interface OutlineInsertOutcome {
+  blocks?: InsertedOutlineNode[];
+  error?: string;
+}
+
 async function insertChildOutline(
   parentUuid: string,
   nodes: OutlineNode[]
-): Promise<InsertedOutlineNode[]> {
+): Promise<OutlineInsertOutcome> {
   const inserted: InsertedOutlineNode[] = [];
   let cursor: string | null = null;
   for (const node of nodes) {
@@ -761,18 +791,28 @@ async function insertChildOutline(
           sibling: false,
         });
     const uuid: string | null = block?.uuid ? String(block.uuid) : null;
+    if (!uuid) {
+      return {
+        error: `insert failed after ${inserted.length} of ${nodes.length} child blocks; the outline was only partially applied. The remaining items were NOT created`,
+      };
+    }
     cursor = uuid;
-    const children = uuid ? await insertChildOutline(uuid, node.children) : [];
-    inserted.push({ uuid, content: node.content, children });
+    const child = await insertChildOutline(uuid, node.children);
+    if (child.error) return { error: child.error };
+    inserted.push({
+      uuid,
+      content: node.content,
+      children: child.blocks ?? [],
+    });
   }
-  return inserted;
+  return { blocks: inserted };
 }
 
 async function insertOutlineNodes(
   pageRef: string,
   nodes: OutlineNode[],
   options: { afterUuid?: string; parentUuid?: string } = {}
-): Promise<InsertedOutlineNode[]> {
+): Promise<OutlineInsertOutcome> {
   const inserted: InsertedOutlineNode[] = [];
   let cursor: string | null = null;
   for (const node of nodes) {
@@ -793,11 +833,21 @@ async function insertOutlineNodes(
       block = await logseq.Editor.appendBlockInPage(pageRef, node.content);
     }
     const uuid: string | null = block?.uuid ? String(block.uuid) : null;
+    if (!uuid) {
+      return {
+        error: `insert failed after ${inserted.length} of ${nodes.length} top-level blocks; the outline was only partially applied. The remaining items were NOT created`,
+      };
+    }
     cursor = uuid;
-    const children = uuid ? await insertChildOutline(uuid, node.children) : [];
-    inserted.push({ uuid, content: node.content, children });
+    const child = await insertChildOutline(uuid, node.children);
+    if (child.error) return { error: child.error };
+    inserted.push({
+      uuid,
+      content: node.content,
+      children: child.blocks ?? [],
+    });
   }
-  return inserted;
+  return { blocks: inserted };
 }
 
 async function insertBlockTool(
@@ -807,16 +857,32 @@ async function insertBlockTool(
 ): Promise<unknown> {
   const normalized = toSingleBlockContent(content);
   if (!normalized) return { error: "content is required" };
+  const failed = {
+    error:
+      "insert failed: Logseq did not create the block. The change was NOT made",
+  };
   if (afterUuid) {
     const err = await ensureBlockOnCurrentPage(afterUuid, page);
     if (err) return { error: err };
     const block = await logseq.Editor.insertBlock(afterUuid, normalized, {
       sibling: true,
     });
-    return { ok: true, uuid: block?.uuid ?? null, insertedAfter: afterUuid };
+    const uuid = block?.uuid ? String(block.uuid) : null;
+    const written = await readBlockAfterWrite(uuid);
+    if (!written) return failed;
+    return {
+      ok: true,
+      uuid,
+      insertedAfter: afterUuid,
+      page: page.name,
+      content: written.content,
+    };
   }
   const block = await logseq.Editor.appendBlockInPage(page.uuid, normalized);
-  return { ok: true, uuid: block?.uuid ?? null, page: page.name };
+  const uuid = block?.uuid ? String(block.uuid) : null;
+  const written = await readBlockAfterWrite(uuid);
+  if (!written) return failed;
+  return { ok: true, uuid, page: page.name, content: written.content };
 }
 
 async function prependBlockTool(
@@ -826,7 +892,15 @@ async function prependBlockTool(
   const normalized = toSingleBlockContent(content);
   if (!normalized) return { error: "content is required" };
   const block = await logseq.Editor.prependBlockInPage(page.uuid, normalized);
-  return { ok: true, uuid: block?.uuid ?? null, page: page.name };
+  const uuid = block?.uuid ? String(block.uuid) : null;
+  const written = await readBlockAfterWrite(uuid);
+  if (!written) {
+    return {
+      error:
+        "insert failed: Logseq did not create the block. The change was NOT made",
+    };
+  }
+  return { ok: true, uuid, page: page.name, content: written.content };
 }
 
 async function updateBlockTool(
@@ -839,7 +913,14 @@ async function updateBlockTool(
   const normalized = toSingleBlockContent(content);
   if (!normalized) return { error: "content is required" };
   await logseq.Editor.updateBlock(uuid, normalized);
-  return { ok: true, uuid };
+  const written = await readBlockAfterWrite(uuid);
+  if (!written) {
+    return {
+      error:
+        "update failed: the block disappeared after writing. The change was NOT applied",
+    };
+  }
+  return { ok: true, uuid, page: page.name, content: written.content };
 }
 
 async function insertOutlineTool(
@@ -861,11 +942,12 @@ async function insertOutlineTool(
   }
   const parsed = parseOutlineForTool(outline);
   if (parsed.error) return { error: parsed.error };
-  const blocks = await insertOutlineNodes(page.uuid, parsed.nodes ?? [], {
+  const result = await insertOutlineNodes(page.uuid, parsed.nodes ?? [], {
     afterUuid: afterUuid || undefined,
     parentUuid: parentUuid || undefined,
   });
-  return { ok: true, page: page.name, blocks };
+  if (result.error) return { error: result.error };
+  return { ok: true, page: page.name, blocks: result.blocks };
 }
 
 async function removeBlockTool(
@@ -875,7 +957,13 @@ async function removeBlockTool(
   const err = await ensureBlockOnCurrentPage(uuid, page);
   if (err) return { error: err };
   await logseq.Editor.removeBlock(uuid);
-  return { ok: true, removed: uuid };
+  const leftover = await logseq.Editor.getBlock(uuid).catch(() => null);
+  if (leftover) {
+    return {
+      error: "remove failed: the block still exists. The change was NOT made",
+    };
+  }
+  return { ok: true, removed: uuid, page: page.name };
 }
 
 async function moveBlockTool(
@@ -893,7 +981,24 @@ async function moveBlockTool(
     before,
     children: asChild,
   });
-  return { ok: true, moved: uuid, target: targetUuid };
+  const moved = await logseq.Editor.getBlock(uuid).catch(() => null);
+  if (!moved) {
+    return {
+      error: "move failed: the block disappeared. The change was NOT applied",
+    };
+  }
+  if (asChild) {
+    const parentId = (moved as { parent?: { id?: number } }).parent?.id;
+    const target = await logseq.Editor.getBlock(targetUuid).catch(() => null);
+    const targetId = (target as { id?: number } | null)?.id;
+    if (parentId != null && targetId != null && parentId !== targetId) {
+      return {
+        error:
+          "move failed: the block did not become a child of the target. The change was NOT applied",
+      };
+    }
+  }
+  return { ok: true, moved: uuid, target: targetUuid, page: page.name };
 }
 
 async function upsertBlockPropertyTool(
@@ -906,7 +1011,14 @@ async function upsertBlockPropertyTool(
   if (err) return { error: err };
   if (!key) return { error: "key is required" };
   await logseq.Editor.upsertBlockProperty(uuid, key, value);
-  return { ok: true, uuid, key };
+  const written = await readBlockAfterWrite(uuid);
+  if (!written) {
+    return {
+      error:
+        "property update failed: the block disappeared. The change was NOT applied",
+    };
+  }
+  return { ok: true, uuid, key, page: page.name, content: written.content };
 }
 
 // --- create_page (user-requested or agent-proposed with consent) ------------
@@ -976,8 +1088,14 @@ async function createPageTool(
     { redirect: false, createFirstBlock: false }
   )) as { uuid?: unknown } | null;
   let blocks: InsertedOutlineNode[] | undefined;
+  let warning: string | undefined;
   if (parsedOutline?.nodes) {
-    blocks = await insertOutlineNodes(name, parsedOutline.nodes);
+    const outlineResult = await insertOutlineNodes(name, parsedOutline.nodes);
+    if (outlineResult.error) {
+      warning = outlineResult.error;
+    } else {
+      blocks = outlineResult.blocks;
+    }
   } else {
     const normalizedBlock = toSingleBlockContent(firstBlock);
     if (normalizedBlock) {
@@ -990,6 +1108,7 @@ async function createPageTool(
     uuid: page?.uuid ? String(page.uuid) : null,
     created: true,
     ...(blocks ? { blocks } : {}),
+    ...(warning ? { warning } : {}),
   };
 }
 
