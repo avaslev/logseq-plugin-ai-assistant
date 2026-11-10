@@ -1,3 +1,15 @@
+# [0.9.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.8.0...v0.9.0) (2026-11-10)
+
+
+### Bug Fixes
+
+* verify graph writes so failed edits are reported instead of claimed ([9221e47](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/9221e47c096e49d1997cc77300710548aacb3f44))
+
+
+### Features
+
+* raise tool round cap to 24 and wrap up when rounds run out ([75bc3ff](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/75bc3ff35685f7c14b29f97d8dd69074ba7d7b1b))
+
 # [0.8.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.7.1...v0.8.0) (2026-11-09)
 
 
