@@ -380,8 +380,16 @@ export async function chatCompletion(
   return acc.result();
 }
 
+export const TOOL_ROUNDS_EXHAUSTED_PROMPT =
+  "The tool round budget is exhausted. Do not call any more tools. Briefly report what you actually changed or found so far and what remains unfinished.";
+
 export type ToolLoopEvent =
-  | { type: "request"; iteration: number; maxIterations: number }
+  | {
+      type: "request";
+      iteration: number;
+      maxIterations: number;
+      wrapUp?: boolean;
+    }
   | { type: "tool-start"; call: ToolCall }
   | { type: "tool-end"; call: ToolCall; ok: boolean; outputLength: number };
 
@@ -389,6 +397,9 @@ export interface ToolLoopOptions {
   messages: ChatMessage[];
   tools: ToolSpec[];
   send: (messages: ChatMessage[]) => Promise<ChatResult>;
+  // Used for the wrap-up request when the round budget runs out mid-tool-run:
+  // sent without tools so the model reports instead of calling more.
+  sendFinal?: (messages: ChatMessage[]) => Promise<ChatResult>;
   execTool: (call: ToolCall, signal?: AbortSignal) => Promise<string>;
   maxIterations?: number;
   signal?: AbortSignal;
@@ -401,6 +412,7 @@ export interface ToolLoopResult {
   reasoning: string;
   toolCalls: ToolCall[];
   iterations: number;
+  roundsExhausted: boolean;
   finishReason?: string | null;
 }
 
@@ -453,12 +465,32 @@ export async function runToolLoop(
     }
   }
 
+  // The loop exited with pending tool calls: the round budget ran out after
+  // the last round's tools executed but before the model saw their results.
+  // Make one final request without tools so the model reports honestly
+  // instead of leaving the answer empty ("completed with tools").
+  let roundsExhausted = false;
+  if (result.toolCalls.length > 0) {
+    roundsExhausted = true;
+    messages.push({ role: "user", content: TOOL_ROUNDS_EXHAUSTED_PROMPT });
+    opts.onEvent?.({
+      type: "request",
+      iteration: iterations + 1,
+      maxIterations,
+      wrapUp: true,
+    });
+    const send = opts.sendFinal ?? opts.send;
+    result = await send(messages);
+    iterations += 1;
+  }
+
   return {
     messages,
     content: result.content,
     reasoning: result.reasoning,
     toolCalls: result.toolCalls,
     iterations,
+    roundsExhausted,
     finishReason: result.finishReason ?? null,
   };
 }

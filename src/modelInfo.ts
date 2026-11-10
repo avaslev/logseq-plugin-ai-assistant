@@ -7,7 +7,7 @@
 import { fetchWithTimeout, readResponseText } from "./http";
 
 export const FALLBACK_CONTEXT_WINDOW = 32768;
-export const MAX_TOOL_ROUNDS = 12;
+export const MAX_TOOL_ROUNDS = 24;
 export const ANSWER_RESERVE_TOKENS = 2048;
 export const MIN_RESPONSE_TOKENS = 256;
 export const MAX_RESPONSE_TOKENS = 8192;

@@ -476,6 +476,7 @@ describe("runToolLoop", () => {
       { name: "search_graph", args: '{"query":"logseq"}' },
     ]);
     expect(loop.content).toBe("Found: logseq is great ((abc))");
+    expect(loop.roundsExhausted).toBe(false);
     const assistantWithTools = loop.messages.find(
       (m) => m.role === "assistant" && m.tool_calls
     );
@@ -485,7 +486,42 @@ describe("runToolLoop", () => {
     expect(toolMessage?.content).toContain("abc");
   });
 
-  it("stops after maxIterations when the model keeps calling tools", async () => {
+  it("stops after maxIterations and wraps up without tools", async () => {
+    const loopingCall = {
+      id: "call_loop",
+      type: "function" as const,
+      function: { name: "t", arguments: "{}" },
+    };
+    let calls = 0;
+    const send = async () => {
+      calls += 1;
+      return { content: "", toolCalls: [{ ...loopingCall }] };
+    };
+    const sendFinalMessages: ChatMessage[][] = [];
+    const sendFinal = async (messages: ChatMessage[]) => {
+      sendFinalMessages.push(messages);
+      return { content: "Partly done; ran out of rounds", toolCalls: [] };
+    };
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      send,
+      sendFinal,
+      execTool: async () => "ok",
+      maxIterations: 5,
+    });
+    expect(calls).toBe(5);
+    expect(loop.iterations).toBe(6);
+    expect(loop.roundsExhausted).toBe(true);
+    expect(loop.content).toBe("Partly done; ran out of rounds");
+    const wrapUp = sendFinalMessages[0];
+    const last = wrapUp[wrapUp.length - 1];
+    expect(last.role).toBe("user");
+    expect(last.content).toContain("budget is exhausted");
+    expect(wrapUp.some((m) => m.role === "tool")).toBe(true);
+  });
+
+  it("falls back to send for the wrap-up when sendFinal is absent", async () => {
     const loopingCall = {
       id: "call_loop",
       type: "function" as const,
@@ -497,13 +533,18 @@ describe("runToolLoop", () => {
       tools: [],
       send: async () => {
         calls += 1;
-        return { content: "", toolCalls: [{ ...loopingCall }] };
+        return {
+          content: calls > 2 ? "final report" : "",
+          toolCalls: calls > 2 ? [] : [{ ...loopingCall }],
+        };
       },
       execTool: async () => "ok",
-      maxIterations: 5,
+      maxIterations: 2,
     });
-    expect(calls).toBe(5);
-    expect(loop.iterations).toBe(5);
+    expect(calls).toBe(3);
+    expect(loop.roundsExhausted).toBe(true);
+    expect(loop.content).toBe("final report");
+    expect(loop.iterations).toBe(3);
   });
 
   it("emits request and tool lifecycle events", async () => {

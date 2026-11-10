@@ -862,15 +862,19 @@ export async function sendMessage(
       );
     });
 
-    const sendWithRetry = async (msgs: ChatMessage[]): Promise<ChatResult> => {
+    const sendWithRetry = async (
+      msgs: ChatMessage[],
+      withTools = true
+    ): Promise<ChatResult> => {
       const attempt = (): Promise<ChatResult> => {
-        const promptTokens = estimateMessagesTokens(msgs) + toolsTokens;
+        const promptTokens =
+          estimateMessagesTokens(msgs) + (withTools ? toolsTokens : 0);
         return chatCompletion({
           baseUrl: settings.apiBaseUrl,
           apiKey: settings.apiKey,
           model,
           messages: msgs,
-          tools,
+          tools: withTools ? tools : [],
           maxTokens: computeResponseTokenBudget(contextWindow, promptTokens),
           signal,
           onDelta: (text) => {
@@ -902,6 +906,7 @@ export async function sendMessage(
       messages,
       tools,
       send: sendWithRetry,
+      sendFinal: (msgs) => sendWithRetry(msgs, false),
       execTool: routeTool,
       signal,
       maxIterations: maxToolRounds,
@@ -909,7 +914,9 @@ export async function sendMessage(
         if (event.type === "request") {
           contentAccum = "";
           setStatus(
-            `💭 Request ${event.iteration} → ${model}`
+            event.wrapUp
+              ? `💭 Wrap-up → ${model}`
+              : `💭 Request ${event.iteration} → ${model}`
           );
           return;
         }

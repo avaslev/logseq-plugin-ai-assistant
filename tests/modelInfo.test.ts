@@ -243,7 +243,8 @@ describe("detectContextWindow", () => {
 
 describe("computeMaxToolRounds", () => {
   it("caps the rounds for a large context", () => {
-    expect(computeMaxToolRounds(32768, 2000)).toBe(MAX_TOOL_ROUNDS);
+    expect(MAX_TOOL_ROUNDS).toBe(24);
+    expect(computeMaxToolRounds(32768, 2000)).toBe(14);
     expect(computeMaxToolRounds(200000, 1000)).toBe(MAX_TOOL_ROUNDS);
   });
 
