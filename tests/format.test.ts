@@ -346,6 +346,12 @@ describe("buildSystemPrompt", () => {
       "Page editing rules"
     );
     expect(buildDefaultSystemPromptBody(true)).toContain("Page editing rules");
+    expect(buildDefaultSystemPromptBody(true)).toContain(
+      "always name the page from the tool result"
+    );
+    expect(buildDefaultSystemPromptBody(true)).toContain(
+      "Never say you added or updated a block unless a write tool returned ok"
+    );
   });
 });
 

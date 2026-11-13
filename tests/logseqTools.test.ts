@@ -416,12 +416,14 @@ describe("write tools", () => {
 
   it("insert_block appends to the current page", async () => {
     const appendBlockInPage = vi.fn().mockResolvedValue({ uuid: "new-1" });
+    const scrollToBlockInPage = vi.fn();
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
       appendBlockInPage,
       getBlock: vi
         .fn()
         .mockResolvedValue({ uuid: "new-1", content: "hello", page: { id: 42 } }),
+      scrollToBlockInPage,
     });
     const result = JSON.parse(
       await executeLogseqTool("insert_block", '{"content":"hello"}')
@@ -433,6 +435,7 @@ describe("write tools", () => {
       content: "hello",
     });
     expect(appendBlockInPage).toHaveBeenCalledWith("page-uuid", "hello");
+    expect(scrollToBlockInPage).toHaveBeenCalledWith("projects", "new-1");
   });
 
   it("insert_block resolves the page when the cursor is on a block", async () => {
@@ -686,10 +689,12 @@ describe("write tools", () => {
       .fn()
       .mockResolvedValueOnce({ uuid: "n2" })
       .mockResolvedValueOnce({ uuid: "n3" });
+    const scrollToBlockInPage = vi.fn();
     mockLogseqEditor({
       getCurrentPage: vi.fn().mockResolvedValue(currentPage),
       appendBlockInPage,
       insertBlock,
+      scrollToBlockInPage,
     });
     const result = JSON.parse(
       await executeLogseqTool(
@@ -715,6 +720,7 @@ describe("write tools", () => {
     expect(insertBlock).toHaveBeenNthCalledWith(2, "n2", "a2", {
       sibling: true,
     });
+    expect(scrollToBlockInPage).toHaveBeenCalledWith("projects", "n1");
   });
 
   it("insert_outline flattens items deeper than one child level", async () => {
@@ -1053,6 +1059,40 @@ describe("write tools", () => {
     expect(result.ok).toBe(true);
     expect(result.warning).toContain("partially applied");
     expect(result.blocks).toBeUndefined();
+  });
+
+  it("insert_block reports an error when the block lands on another page", async () => {
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage: vi.fn().mockResolvedValue({ uuid: "new-7" }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "new-7",
+        content: "x",
+        page: { id: 99 },
+      }),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("insert_block", '{"content":"x"}')
+    );
+    expect(result.error).toContain("landed on a different page");
+    expect(result.ok).toBeUndefined();
+  });
+
+  it("insert_block tolerates scroll failures", async () => {
+    mockLogseqEditor({
+      getCurrentPage: vi.fn().mockResolvedValue(currentPage),
+      appendBlockInPage: vi.fn().mockResolvedValue({ uuid: "new-8" }),
+      getBlock: vi.fn().mockResolvedValue({
+        uuid: "new-8",
+        content: "x",
+        page: { id: 42 },
+      }),
+      scrollToBlockInPage: vi.fn().mockRejectedValue(new Error("no render")),
+    });
+    const result = JSON.parse(
+      await executeLogseqTool("insert_block", '{"content":"x"}')
+    );
+    expect(result.ok).toBe(true);
   });
 
   it("reports when no page is open", async () => {

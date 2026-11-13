@@ -222,6 +222,8 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
           "- Do not over-nest: for a simple list prefer one flat block with • lines. Hierarchy is for real sections and sub-items, not for every bullet.",
           "- A write tool returning ok means the change happened; a tool returning an error means NOTHING changed. If an edit fails, tell the user what failed — never claim success.",
           "- Report page edits based on the content the write tool returns, not on what you intended to write.",
+          "- When reporting an edit, always name the page from the tool result's page field. If that page differs from the one the user asked about, say plainly that the requested page was not open and was NOT changed.",
+          "- Never say you added or updated a block unless a write tool returned ok in this turn.",
           "- For destructive actions (remove_block, move_block) describe what you are about to change and confirm with the user first if the request is ambiguous.",
           "- After editing, briefly report what changed; do not paste whole edited blocks back unless asked.",
           "",

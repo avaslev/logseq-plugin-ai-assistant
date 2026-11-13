@@ -771,25 +771,54 @@ async function ensureBlockOnCurrentPage(
 
 const WRITE_CONTENT_PREVIEW_LENGTH = 200;
 
+interface WrittenBlock {
+  content: string;
+  wrongPage: boolean;
+}
+
 // Re-reads a block right after a write so tool results reflect the graph
 // state instead of the model's intention. Returns null when the block is
-// missing, which callers turn into an explicit error.
+// missing; wrongPage flags a block that landed on a page other than the one
+// the write targeted (stale or orphaned page target).
 async function readBlockAfterWrite(
-  uuid: string | null
-): Promise<{ content: string } | null> {
+  uuid: string | null,
+  expectedPageId?: number
+): Promise<WrittenBlock | null> {
   if (!uuid) return null;
   try {
     const block = await logseq.Editor.getBlock(uuid);
     if (!block) return null;
     const content = String((block as { content?: unknown }).content ?? "");
+    const blockPageId = (block as { page?: { id?: number } }).page?.id;
+    const wrongPage =
+      expectedPageId != null &&
+      blockPageId != null &&
+      blockPageId !== expectedPageId;
     return {
       content:
         content.length > WRITE_CONTENT_PREVIEW_LENGTH
           ? `${content.slice(0, WRITE_CONTENT_PREVIEW_LENGTH)}…`
           : content,
+      wrongPage,
     };
   } catch {
     return null;
+  }
+}
+
+// A successful write does not always re-render the open page: Logseq defers
+// redraws of plugin-made changes until something pokes the editor. Scrolling
+// to the new block shows the change immediately and flushes that render.
+function scrollToBlock(pageName: string, uuid: string | null): void {
+  if (!uuid) return;
+  try {
+    Promise.resolve(logseq.Editor.scrollToBlockInPage(pageName, uuid)).catch(
+      () => {
+        // rendering pokes are best-effort
+      }
+    );
+  } catch {
+    // rendering pokes are best-effort
   }
 }
 
@@ -900,6 +929,10 @@ async function insertBlockTool(
     error:
       "insert failed: Logseq did not create the block. The change was NOT made",
   };
+  const landedWrong = {
+    error:
+      "insert failed: the block landed on a different page. The change was NOT made where expected",
+  };
   if (afterUuid) {
     const err = await ensureBlockOnCurrentPage(afterUuid, page);
     if (err) return { error: err };
@@ -907,8 +940,10 @@ async function insertBlockTool(
       sibling: true,
     });
     const uuid = block?.uuid ? String(block.uuid) : null;
-    const written = await readBlockAfterWrite(uuid);
+    const written = await readBlockAfterWrite(uuid, page.id);
     if (!written) return failed;
+    if (written.wrongPage) return landedWrong;
+    scrollToBlock(page.name, uuid);
     return {
       ok: true,
       uuid,
@@ -919,8 +954,10 @@ async function insertBlockTool(
   }
   const block = await logseq.Editor.appendBlockInPage(page.uuid, normalized);
   const uuid = block?.uuid ? String(block.uuid) : null;
-  const written = await readBlockAfterWrite(uuid);
+  const written = await readBlockAfterWrite(uuid, page.id);
   if (!written) return failed;
+  if (written.wrongPage) return landedWrong;
+  scrollToBlock(page.name, uuid);
   return { ok: true, uuid, page: page.name, content: written.content };
 }
 
@@ -932,13 +969,20 @@ async function prependBlockTool(
   if (!normalized) return { error: "content is required" };
   const block = await logseq.Editor.prependBlockInPage(page.uuid, normalized);
   const uuid = block?.uuid ? String(block.uuid) : null;
-  const written = await readBlockAfterWrite(uuid);
+  const written = await readBlockAfterWrite(uuid, page.id);
   if (!written) {
     return {
       error:
         "insert failed: Logseq did not create the block. The change was NOT made",
     };
   }
+  if (written.wrongPage) {
+    return {
+      error:
+        "insert failed: the block landed on a different page. The change was NOT made where expected",
+    };
+  }
+  scrollToBlock(page.name, uuid);
   return { ok: true, uuid, page: page.name, content: written.content };
 }
 
@@ -952,11 +996,17 @@ async function updateBlockTool(
   const normalized = toSingleBlockContent(content);
   if (!normalized) return { error: "content is required" };
   await logseq.Editor.updateBlock(uuid, normalized);
-  const written = await readBlockAfterWrite(uuid);
+  const written = await readBlockAfterWrite(uuid, page.id);
   if (!written) {
     return {
       error:
         "update failed: the block disappeared after writing. The change was NOT applied",
+    };
+  }
+  if (written.wrongPage) {
+    return {
+      error:
+        "update failed: the block landed on a different page. The change was NOT applied",
     };
   }
   return { ok: true, uuid, page: page.name, content: written.content };
@@ -986,7 +1036,9 @@ async function insertOutlineTool(
     parentUuid: parentUuid || undefined,
   });
   if (result.error) return { error: result.error };
-  return { ok: true, page: page.name, blocks: result.blocks };
+  const blocks = result.blocks ?? [];
+  scrollToBlock(page.name, blocks[0]?.uuid ?? null);
+  return { ok: true, page: page.name, blocks };
 }
 
 async function removeBlockTool(
@@ -1050,11 +1102,17 @@ async function upsertBlockPropertyTool(
   if (err) return { error: err };
   if (!key) return { error: "key is required" };
   await logseq.Editor.upsertBlockProperty(uuid, key, value);
-  const written = await readBlockAfterWrite(uuid);
+  const written = await readBlockAfterWrite(uuid, page.id);
   if (!written) {
     return {
       error:
         "property update failed: the block disappeared. The change was NOT applied",
+    };
+  }
+  if (written.wrongPage) {
+    return {
+      error:
+        "property update failed: the block landed on a different page. The change was NOT applied",
     };
   }
   return { ok: true, uuid, key, page: page.name, content: written.content };
