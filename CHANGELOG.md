@@ -1,3 +1,10 @@
+## [0.10.1](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.0...v0.10.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* scroll to new blocks and verify the page they land on ([c3a0313](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/c3a031345e3ebe234e02947b850808ce286c863c))
+
 # [0.10.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.9.0...v0.10.0) (2026-11-10)
 
 
