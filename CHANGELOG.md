@@ -1,3 +1,10 @@
+# [0.11.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.3...v0.11.0) (2026-11-17)
+
+
+### Features
+
+* expose block nesting (depth, parentUuid) and add get_block_subtree section reader ([06f38e9](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/06f38e95bca59f508512bbe647fb1be4bc04b0c1))
+
 ## [0.10.3](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.2...v0.10.3) (2026-11-17)
 
 
