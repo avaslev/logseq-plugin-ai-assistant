@@ -228,16 +228,22 @@ function countBlocks(tree: BlockNode[]): number {
   return n;
 }
 
+// Safety ceiling for a single page walk; real output is bounded by the
+// offset/limit window and the final truncate() cap.
+const MAX_PAGE_BLOCKS = 500;
+
 // Page read result with an explicit marker when the block list was capped,
 // so the model knows it saw only part of the page.
 function pageReadResult(
   tree: BlockNode[],
-  limit: number
+  limit: number,
+  offset = 0
 ): Record<string, unknown> {
   const total = countBlocks(tree);
-  const blocks = flattenBlocks(tree, limit);
+  const all = flattenBlocks(tree, MAX_PAGE_BLOCKS);
+  const blocks = all.slice(offset, offset + limit);
   const result: Record<string, unknown> = { blocks };
-  if (total > blocks.length) result.totalBlocks = total;
+  if (total > blocks.length + offset) result.totalBlocks = total;
   return result;
 }
 
@@ -752,11 +758,21 @@ async function getPageTool(pageName: string): Promise<unknown> {
   };
 }
 
-async function getPageBlocksTool(pageName: string): Promise<unknown> {
+async function getPageBlocksTool(
+  pageName: string,
+  offset?: number
+): Promise<unknown> {
   const page = await logseq.Editor.getPage(pageName);
   if (!page) return { error: `Page "${pageName}" not found` };
   const tree = await logseq.Editor.getPageBlocksTree(page.uuid);
-  return { page: page.name, ...pageReadResult(tree as BlockNode[], PAGE_BLOCKS_LIMIT) };
+  return {
+    page: page.name,
+    ...pageReadResult(
+      tree as BlockNode[],
+      PAGE_BLOCKS_LIMIT,
+      Math.max(0, Math.floor(offset ?? 0))
+    ),
+  };
 }
 
 async function getBlockTool(uuid: string): Promise<unknown> {
@@ -1394,11 +1410,16 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_page_blocks",
         description:
-          "Read the content of a page: list of blocks (uuid, content, children count) in document order, up to 200 blocks. When the result has totalBlocks, the page was larger — read the missing part via query_blocks or get_block before answering.",
+          "Read the content of a page: list of blocks (uuid, content, children count) in document order, up to 200 blocks per call. When the result has totalBlocks, the page was larger — repeat with a bigger offset (e.g. offset=200) to read the rest before answering.",
         parameters: {
           type: "object",
           properties: {
             page: { type: "string", description: "Page name" },
+            offset: {
+              type: "number",
+              description:
+                "Skip the first N blocks (document order) before returning, for reading large pages in portions",
+            },
           },
           required: ["page"],
         },
@@ -1824,7 +1845,12 @@ export async function executeLogseqTool(
       case "get_page":
         return stringify(await getPageTool(String(args.page ?? "")));
       case "get_page_blocks":
-        return stringify(await getPageBlocksTool(String(args.page ?? "")));
+        return stringify(
+          await getPageBlocksTool(
+            String(args.page ?? ""),
+            args.offset == null ? undefined : Number(args.offset)
+          )
+        );
       case "get_block":
         return stringify(await getBlockTool(String(args.uuid ?? "")));
       case "get_current_page":

@@ -427,21 +427,31 @@ async function removeSession(): Promise<void> {
   // Logseq (md graphs) redirects the main view to the home page before deleting
   // ANY page via Editor.deletePage, even one that only lived in the right
   // sidebar. Restore the page the user had open so they can keep working on it.
-  try {
-    const nowOpen = await getOpenPageName();
-    const wasOpenSessionPage =
-      openPageName?.toLowerCase() === pageName.toLowerCase();
-    const redirected =
-      openPageName &&
-      nowOpen &&
-      nowOpen.toLowerCase() !== openPageName.toLowerCase();
-    // Skip restoring when the user was reading the session page itself —
-    // it no longer exists, so the redirect away was correct.
-    if (redirected && !wasOpenSessionPage) {
-      logseq.App.replaceState("page", { name: openPageName });
+  const wasOpenSessionPage =
+    openPageName?.toLowerCase() === pageName.toLowerCase();
+  if (openPageName && !wasOpenSessionPage) {
+    // The redirect may land during or right after the deletion, so re-check
+    // a few times before giving up.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      let nowOpen: string | null = null;
+      try {
+        nowOpen = await getOpenPageName();
+      } catch {
+        break;
+      }
+      if (!nowOpen) continue;
+      if (nowOpen.toLowerCase() === openPageName.toLowerCase()) break;
+      try {
+        console.info(
+          `[ai-assistant] /remove: Logseq redirected the main view to "${nowOpen}", restoring "${openPageName}"`
+        );
+        logseq.App.replaceState("page", { name: openPageName });
+      } catch {
+        // navigation restore is cosmetic
+      }
+      break;
     }
-  } catch {
-    // navigation restore is cosmetic
   }
 
   if (currentSessionPage === pageName) currentSessionPage = null;
