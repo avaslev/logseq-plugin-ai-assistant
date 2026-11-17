@@ -1,3 +1,10 @@
+## [0.10.3](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.2...v0.10.3) (2026-11-17)
+
+
+### Bug Fixes
+
+* retry page restore after /remove and let get_page_blocks paginate large pages ([65a76d3](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/65a76d3003ddff529cb7defb9277b88532e246ce))
+
 ## [0.10.2](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.1...v0.10.2) (2026-11-17)
 
 
