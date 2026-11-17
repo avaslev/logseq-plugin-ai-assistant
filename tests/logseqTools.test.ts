@@ -84,6 +84,7 @@ describe("tool specs", () => {
       "get_page",
       "get_page_blocks",
       "get_block",
+      "get_block_subtree",
       "get_current_page",
       "get_selected_blocks",
       "query_blocks",
@@ -1818,7 +1819,15 @@ describe("get_selected_blocks (F10)", () => {
       (await executeLogseqTool("get_selected_blocks", "{}")) as string
     );
     expect(result).toEqual({
-      blocks: [{ uuid: "u1", content: "selected text", children: 0 }],
+      blocks: [
+        {
+          uuid: "u1",
+          content: "selected text",
+          children: 0,
+          depth: 0,
+          parentUuid: null,
+        },
+      ],
     });
   });
 
@@ -1840,5 +1849,51 @@ describe("get_selected_blocks (F10)", () => {
     expect(JSON.parse(
       (await executeLogseqTool("get_selected_blocks", "{}")) as string
     )).toEqual({ blocks: [] });
+  });
+});
+
+describe("get_block_subtree", () => {
+  it("renders the nested subtree as an outline with blockRefs", async () => {
+    const getBlock = vi.fn().mockResolvedValue({
+      uuid: "root",
+      content: "open questions",
+      children: [
+        {
+          uuid: "q1",
+          content: "question 1",
+          children: [{ uuid: "a1", content: "answer 1", children: [] }],
+        },
+        { uuid: "q2", content: "question 2", children: [] },
+      ],
+    });
+    mockLogseqEditor({ getBlock });
+    const result = JSON.parse(
+      (await executeLogseqTool("get_block_subtree", '{"uuid":"root"}')) as string
+    );
+    expect(result).toEqual({
+      uuid: "root",
+      outline: [
+        "- open questions",
+        "  - question 1",
+        "    - answer 1",
+        "  - question 2",
+      ].join("\n"),
+      blockRefs: [
+        { uuid: "root", depth: 0 },
+        { uuid: "q1", depth: 1 },
+        { uuid: "a1", depth: 2 },
+        { uuid: "q2", depth: 1 },
+      ],
+    });
+    expect(getBlock).toHaveBeenCalledWith("root", { includeChildren: true });
+  });
+
+  it("reports missing and empty blocks", async () => {
+    mockLogseqEditor({
+      getBlock: vi.fn().mockResolvedValue(null),
+    });
+    expect(JSON.parse(
+      (await executeLogseqTool("get_block_subtree", '{"uuid":"nope"}')) as string
+    )).toEqual({ error: 'Block "nope" not found' });
   });
 });

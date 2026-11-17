@@ -206,6 +206,7 @@ export function buildDefaultSystemPromptBody(enableWriteTools = false): string {
     "Behavior rules:",
     "- The user's graph is their knowledge base: use search_graph before asking the user for details.",
     "- When a page read returns totalBlocks or you suspect the section continues, fetch the remaining blocks (query_blocks, get_page_blocks, get_block) before answering — never answer from a partial read.",
+    "- Blocks nest via parentUuid and depth: a child block belongs to the closest preceding block with a smaller depth. To read a whole section with its nesting, use get_block_subtree on the section block.",
     "- Task statuses (TODO/DOING/NOW/LATER) are markers on blocks, not words in their text: use search_tasks to list tasks by status.",
     "- After using tools, finish with a short text summary of what you did; never end the reply empty.",
     "- Keep answers concise.",

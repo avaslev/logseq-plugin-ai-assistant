@@ -195,24 +195,42 @@ function blockChildren(node: BlockNode): BlockNode[] {
   return Array.isArray(node.children) ? (node.children as BlockNode[]) : [];
 }
 
-function flattenBlocks(tree: BlockNode[], limit = 40): Array<{
+function flattenBlocks(
+  tree: BlockNode[],
+  limit = 40
+): Array<{
   uuid: string;
   content: string;
   children: number;
+  depth: number;
+  parentUuid: string | null;
 }> {
-  const out: Array<{ uuid: string; content: string; children: number }> = [];
-  const walk = (nodes: BlockNode[]): void => {
+  const out: Array<{
+    uuid: string;
+    content: string;
+    children: number;
+    depth: number;
+    parentUuid: string | null;
+  }> = [];
+  const walk = (
+    nodes: BlockNode[],
+    depth: number,
+    parentUuid: string | null
+  ): void => {
     for (const node of nodes ?? []) {
       if (out.length >= limit) return;
+      const uuid = String(node.uuid ?? "");
       out.push({
-        uuid: String(node.uuid ?? ""),
+        uuid,
         content: String(node.content ?? ""),
         children: blockChildren(node).length,
+        depth,
+        parentUuid,
       });
-      walk(blockChildren(node));
+      walk(blockChildren(node), depth + 1, uuid);
     }
   };
-  walk(tree);
+  walk(tree, 0, null);
   return out;
 }
 
@@ -784,6 +802,40 @@ async function getBlockTool(uuid: string): Promise<unknown> {
   const [top, ...childBlocks] = flat;
   if (!top) return { error: "Empty block" };
   return { ...top, childBlocks };
+}
+
+// Reads a whole section at once: the block and everything nested under it,
+// rendered as an indented outline a model can parse directly. blockRefs
+// maps each outline line (in the same order) to its block uuid.
+async function getBlockSubtreeTool(uuid: string): Promise<unknown> {
+  const block = await logseq.Editor.getBlock(uuid, {
+    includeChildren: true,
+  });
+  if (!block) return { error: `Block "${uuid}" not found` };
+  const root = block as BlockNode;
+  if (!String(root.uuid ?? "")) return { error: "Empty block" };
+  const lines: string[] = [];
+  const blockRefs: Array<{ uuid: string; depth: number }> = [];
+  let count = 0;
+  let capped = false;
+  const walk = (node: BlockNode, depth: number): void => {
+    if (count >= MAX_PAGE_BLOCKS) {
+      capped = true;
+      return;
+    }
+    count++;
+    lines.push("  ".repeat(depth) + "- " + String(node.content ?? ""));
+    blockRefs.push({ uuid: String(node.uuid ?? ""), depth });
+    for (const child of blockChildren(node)) walk(child, depth + 1);
+  };
+  walk(root, 0);
+  const result: Record<string, unknown> = {
+    uuid: String(root.uuid ?? ""),
+    outline: lines.join("\n"),
+    blockRefs,
+  };
+  if (capped) result.truncated = true;
+  return result;
 }
 
 async function getCurrentPageTool(): Promise<unknown> {
@@ -1410,7 +1462,7 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_page_blocks",
         description:
-          "Read the content of a page: list of blocks (uuid, content, children count) in document order, up to 200 blocks per call. When the result has totalBlocks, the page was larger — repeat with a bigger offset (e.g. offset=200) to read the rest before answering.",
+          "Read the content of a page: flat list of blocks (uuid, content, children count, depth, parentUuid) in document order, up to 200 blocks per call. Blocks nest under the block whose uuid matches their parentUuid; depth 0 = page top level. When the result has totalBlocks, the page was larger — repeat with a bigger offset (e.g. offset=200) to read the rest before answering.",
         parameters: {
           type: "object",
           properties: {
@@ -1430,7 +1482,7 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_block",
         description:
-          "Read a single block with its child blocks (childBlocks) by block uuid. Use it to get full context for ((uuid)) references.",
+          "Read a single block with its child blocks (childBlocks, each has depth and parentUuid) by block uuid. Use it to get full context for ((uuid)) references. For a whole nested section use get_block_subtree.",
         parameters: {
           type: "object",
           properties: {
@@ -1443,9 +1495,24 @@ export function getLogseqToolSpecs(): ToolSpec[] {
     {
       type: "function",
       function: {
+        name: "get_block_subtree",
+        description:
+          "Read one block and its entire subtree as an indented outline — use it to see a whole section (e.g. every item under a heading) at once without reading the full page. The blockRefs array maps each outline line (same order) to its block uuid.",
+        parameters: {
+          type: "object",
+          properties: {
+            uuid: { type: "string", description: "Block uuid of the section" },
+          },
+          required: ["uuid"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "get_current_page",
         description:
-          "Get the page the user currently has open in the main editor, with its first 100 blocks. When the result has totalBlocks, read the rest via query_blocks or get_block before answering.",
+          "Get the page the user currently has open in the main editor, with its first 100 blocks as a flat list (uuid, content, children count, depth, parentUuid). Blocks nest under the block whose uuid matches their parentUuid. When the result has totalBlocks, read the rest via get_page_blocks with offset or get_block_subtree before answering.",
         parameters: { type: "object", properties: {} },
       },
     },
@@ -1853,6 +1920,8 @@ export async function executeLogseqTool(
         );
       case "get_block":
         return stringify(await getBlockTool(String(args.uuid ?? "")));
+      case "get_block_subtree":
+        return stringify(await getBlockSubtreeTool(String(args.uuid ?? "")));
       case "get_current_page":
         return stringify(await getCurrentPageTool());
       case "get_selected_blocks":
