@@ -11,7 +11,14 @@ import { confirmActionWithSignal } from "./confirm";
 import { buildSkillPrompt, findSkill, listSkills } from "./skills";
 import { createDrawing } from "./draw";
 
-const MAX_TOOL_OUTPUT = 4000;
+// Tool results are injected into the model context; the cap keeps a single
+// read from flooding it. Large enough for a full page section with answers.
+const MAX_TOOL_OUTPUT = 12000;
+// Long strings are shortened stepwise before the output is cut, so tool
+// results stay valid JSON and list items are not silently dropped.
+const TRUNCATE_STRING_CAPS = [2000, 500, 150];
+const PAGE_BLOCKS_LIMIT = 200;
+const CURRENT_PAGE_BLOCKS_LIMIT = 100;
 const MAX_SEARCH_RESULTS = 15;
 const SEARCH_CACHE_TTL_MS = 15_000;
 const SEARCH_CACHE_MAX = 20;
@@ -209,8 +216,58 @@ function flattenBlocks(tree: BlockNode[], limit = 40): Array<{
   return out;
 }
 
+function countBlocks(tree: BlockNode[]): number {
+  let n = 0;
+  const walk = (nodes: BlockNode[]): void => {
+    for (const node of nodes ?? []) {
+      n++;
+      walk(blockChildren(node));
+    }
+  };
+  walk(tree);
+  return n;
+}
+
+// Page read result with an explicit marker when the block list was capped,
+// so the model knows it saw only part of the page.
+function pageReadResult(
+  tree: BlockNode[],
+  limit: number
+): Record<string, unknown> {
+  const total = countBlocks(tree);
+  const blocks = flattenBlocks(tree, limit);
+  const result: Record<string, unknown> = { blocks };
+  if (total > blocks.length) result.totalBlocks = total;
+  return result;
+}
+
+// Keep the output valid JSON even when it exceeds the cap: first shorten long
+// strings (progressively tighter), and only cut raw JSON as a last resort.
+function shrinkStrings(value: unknown, cap: number): unknown {
+  if (typeof value === "string") {
+    return value.length <= cap ? value : `${value.slice(0, cap)}…`;
+  }
+  if (Array.isArray(value)) return value.map((item) => shrinkStrings(item, cap));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = shrinkStrings(item, cap);
+    }
+    return out;
+  }
+  return value;
+}
+
 function truncate(data: unknown): string {
-  return JSON.stringify(data).slice(0, MAX_TOOL_OUTPUT);
+  const json = JSON.stringify(data);
+  if (json.length <= MAX_TOOL_OUTPUT) return json;
+  for (const cap of TRUNCATE_STRING_CAPS) {
+    const shrunk = JSON.stringify(shrinkStrings(data, cap));
+    if (shrunk.length <= MAX_TOOL_OUTPUT) return shrunk;
+  }
+  return JSON.stringify(
+    shrinkStrings(data, TRUNCATE_STRING_CAPS[TRUNCATE_STRING_CAPS.length - 1])
+  ).slice(0, MAX_TOOL_OUTPUT);
 }
 
 async function fetchAllPageNames(): Promise<{
@@ -699,7 +756,7 @@ async function getPageBlocksTool(pageName: string): Promise<unknown> {
   const page = await logseq.Editor.getPage(pageName);
   if (!page) return { error: `Page "${pageName}" not found` };
   const tree = await logseq.Editor.getPageBlocksTree(page.uuid);
-  return { page: page.name, blocks: flattenBlocks(tree) };
+  return { page: page.name, ...pageReadResult(tree as BlockNode[], PAGE_BLOCKS_LIMIT) };
 }
 
 async function getBlockTool(uuid: string): Promise<unknown> {
@@ -707,26 +764,27 @@ async function getBlockTool(uuid: string): Promise<unknown> {
     includeChildren: true,
   });
   if (!block) return { error: `Block "${uuid}" not found` };
-  return flattenBlocks([block as BlockNode])[0] ?? { error: "Empty block" };
+  const flat = flattenBlocks([block as BlockNode], 100);
+  const [top, ...childBlocks] = flat;
+  if (!top) return { error: "Empty block" };
+  return { ...top, childBlocks };
 }
 
 async function getCurrentPageTool(): Promise<unknown> {
   const entity = await logseq.Editor.getCurrentPage();
   if (!entity) return { error: "No current page" };
   const asPage = entity as { name?: string; uuid?: string };
-  const result: Record<string, unknown> = {
-    name: asPage.name ?? null,
-    uuid: asPage.uuid ?? null,
-  };
-  if (asPage.uuid) {
-    try {
-      const tree = await logseq.Editor.getPageBlocksTree(asPage.uuid);
-      result.blocks = flattenBlocks(tree, 20);
-    } catch {
-      return result;
-    }
+  if (!asPage.uuid) return { name: asPage.name ?? null, uuid: null };
+  try {
+    const tree = await logseq.Editor.getPageBlocksTree(asPage.uuid);
+    return {
+      name: asPage.name ?? null,
+      uuid: asPage.uuid,
+      ...pageReadResult(tree as BlockNode[], CURRENT_PAGE_BLOCKS_LIMIT),
+    };
+  } catch {
+    return { name: asPage.name ?? null, uuid: asPage.uuid };
   }
-  return result;
 }
 
 interface CurrentPage {
@@ -1336,7 +1394,7 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_page_blocks",
         description:
-          "Read the content of a page: list of blocks (uuid, content, children count) in document order.",
+          "Read the content of a page: list of blocks (uuid, content, children count) in document order, up to 200 blocks. When the result has totalBlocks, the page was larger — read the missing part via query_blocks or get_block before answering.",
         parameters: {
           type: "object",
           properties: {
@@ -1351,7 +1409,7 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_block",
         description:
-          "Read a single block with its children by block uuid. Use it to get full context for ((uuid)) references.",
+          "Read a single block with its child blocks (childBlocks) by block uuid. Use it to get full context for ((uuid)) references.",
         parameters: {
           type: "object",
           properties: {
@@ -1366,7 +1424,7 @@ export function getLogseqToolSpecs(): ToolSpec[] {
       function: {
         name: "get_current_page",
         description:
-          "Get the page the user currently has open in the main editor, with its first blocks.",
+          "Get the page the user currently has open in the main editor, with its first 100 blocks. When the result has totalBlocks, read the rest via query_blocks or get_block before answering.",
         parameters: { type: "object", properties: {} },
       },
     },
