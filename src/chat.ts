@@ -367,12 +367,26 @@ const COMPRESS_SYSTEM_PROMPT = [
   "Reply with the summary only — no preamble.",
 ].join(" ");
 
+// Name of the page currently open in the main view, or null when unknown.
+async function getOpenPageName(): Promise<string | null> {
+  try {
+    const entity = (await logseq.Editor.getCurrentPage()) as {
+      name?: string;
+      page?: { name?: string };
+    } | null;
+    return entity?.page?.name ?? entity?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function removeSession(): Promise<void> {
   const pageName = currentSessionPage;
   if (!pageName) {
     assistantInfo("No active session to remove");
     return;
   }
+  const openPageName = await getOpenPageName();
 
   const confirmed = await confirmAction({
     title: "Delete this session?",
@@ -408,6 +422,26 @@ async function removeSession(): Promise<void> {
     }
   } catch {
     // lookup failed — assume the page is gone
+  }
+
+  // Logseq (md graphs) redirects the main view to the home page before deleting
+  // ANY page via Editor.deletePage, even one that only lived in the right
+  // sidebar. Restore the page the user had open so they can keep working on it.
+  try {
+    const nowOpen = await getOpenPageName();
+    const wasOpenSessionPage =
+      openPageName?.toLowerCase() === pageName.toLowerCase();
+    const redirected =
+      openPageName &&
+      nowOpen &&
+      nowOpen.toLowerCase() !== openPageName.toLowerCase();
+    // Skip restoring when the user was reading the session page itself —
+    // it no longer exists, so the redirect away was correct.
+    if (redirected && !wasOpenSessionPage) {
+      logseq.App.replaceState("page", { name: openPageName });
+    }
+  } catch {
+    // navigation restore is cosmetic
   }
 
   if (currentSessionPage === pageName) currentSessionPage = null;
