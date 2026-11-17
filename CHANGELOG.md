@@ -1,3 +1,11 @@
+## [0.10.2](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.1...v0.10.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* raise read tool limits so long page sections are fully visible to the agent ([e81b8ae](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/e81b8aed97583b3882270f9e27ef83dcc3af899c))
+* restore the open page after /remove deletes the session page ([0a8d93e](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/0a8d93e5b5fc11b29bce1d9aa186d9b0978e1744))
+
 ## [0.10.1](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.0...v0.10.1) (2026-11-13)
 
 
