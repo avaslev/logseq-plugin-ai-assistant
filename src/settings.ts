@@ -3,12 +3,15 @@ import type { SettingSchemaDesc } from "@logseq/libs/dist/LSPlugin";
 import { filterChatModels, listModels } from "./llm";
 import { resetMcpState } from "./mcp";
 
+export type ToolPreset = "off" | "lite" | "full";
+
 const DEFAULTS = {
   apiBaseUrl: "http://localhost:1234/v1",
   apiKey: "",
   defaultModel: "",
   historyBlocks: 20,
-  enableTools: true,
+  maxContextTokens: 0,
+  toolPreset: "lite" as ToolPreset,
   enableWriteTools: false,
   mcpServers: "[]",
 };
@@ -18,9 +21,20 @@ export interface AppSettings {
   apiKey: string;
   defaultModel: string;
   historyBlocks: number;
-  enableTools: boolean;
+  // 0 = use the detected context window; > 0 overrides it (tokens).
+  maxContextTokens: number;
+  toolPreset: ToolPreset;
   enableWriteTools: boolean;
   mcpServers: string;
+}
+
+// The old `enableTools` boolean is migrated: explicit off stays off, anything
+// else starts with the compact preset so weak models get fewer schemas.
+function readToolPreset(raw: Record<string, unknown>): ToolPreset {
+  const value = raw.toolPreset;
+  if (value === "off" || value === "lite" || value === "full") return value;
+  if (raw.enableTools === false) return "off";
+  return DEFAULTS.toolPreset;
 }
 
 let availableModels: string[] = [];
@@ -39,7 +53,13 @@ export function getSettings(): AppSettings {
       typeof raw.historyBlocks === "number" && raw.historyBlocks > 0
         ? Math.floor(raw.historyBlocks)
         : DEFAULTS.historyBlocks,
-    enableTools: typeof raw.enableTools === "boolean" ? raw.enableTools : DEFAULTS.enableTools,
+    maxContextTokens:
+      typeof raw.maxContextTokens === "number" &&
+      Number.isFinite(raw.maxContextTokens) &&
+      raw.maxContextTokens > 0
+        ? Math.floor(raw.maxContextTokens)
+        : DEFAULTS.maxContextTokens,
+    toolPreset: readToolPreset(raw),
     enableWriteTools:
       typeof raw.enableWriteTools === "boolean"
         ? raw.enableWriteTools
@@ -118,20 +138,30 @@ function registerSchema(): void {
         "How many last blocks of the session are sent to the model as context. Lower it if your machine runs out of memory",
     },
     {
-      key: "enableTools",
-      type: "boolean",
-      default: DEFAULTS.enableTools,
-      title: "Enable tools (graph search & MCP)",
+      key: "maxContextTokens",
+      type: "number",
+      default: DEFAULTS.maxContextTokens,
+      title: "Max context tokens (0 = auto)",
       description:
-        "Turn off on weak hardware: tools make the request context much larger",
+        "Override the context window the plugin detects. Set it (e.g. 8192) when a small local model overflows or answers badly because the server reports no window",
+    },
+    {
+      key: "toolPreset",
+      type: "enum",
+      default: DEFAULTS.toolPreset,
+      title: "Tools",
+      description:
+        "off: no tools; lite: 6 read-only graph tools (recommended for weak models); full: all graph, web and MCP tools",
+      enumChoices: ["off", "lite", "full"],
+      enumPicker: "select",
     },
     {
       key: "enableWriteTools",
       type: "boolean",
       default: DEFAULTS.enableWriteTools,
-      title: "Allow editing the open page",
+      title: "Allow editing the open page (full preset only)",
       description:
-        "Let the agent insert, update, remove and move blocks and set properties on the page you currently have open. Off by default",
+        "Let the agent insert, update, remove and move blocks and set properties on the page you currently have open. Requires the full tool preset. Off by default",
     },
     {
       key: "mcp-heading",

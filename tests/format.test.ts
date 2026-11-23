@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   ASSISTANT_MARKER,
-  buildDefaultSystemPromptBody,
-  buildSystemPrompt,
   historyFromTree,
   markAssistantContent,
   sanitizeSessionSlug,
   sentMessagesFromTree,
+  shrinkMessagesForOverflow,
   toSingleBlockContent,
   trimHistoryToBudget,
 } from "../src/format";
+import {
+  buildDefaultSystemPromptBody,
+  buildSystemPrompt,
+} from "../src/prompts/systemPrompt";
 import type { ChatMessage } from "../src/llm";
 import { THINKING_TEXT } from "../src/strings";
 
@@ -352,6 +355,91 @@ describe("buildSystemPrompt", () => {
     expect(buildDefaultSystemPromptBody(true)).toContain(
       "Never say you added or updated a block unless a write tool returned ok"
     );
+  });
+
+  it("omits tool rules when the preset is off", () => {
+    const prompt = buildDefaultSystemPromptBody(false, "off");
+    expect(prompt).not.toContain("Graph reference rules");
+    expect(prompt).not.toContain("Behavior rules");
+    expect(prompt).not.toContain("search_graph");
+    expect(buildSystemPrompt(new Date(), true, "off")).not.toContain(
+      "Page editing rules"
+    );
+  });
+
+  it("keeps graph rules but not writing or web rules in lite", () => {
+    const prompt = buildDefaultSystemPromptBody(true, "lite");
+    expect(prompt).toContain("Graph reference rules");
+    expect(prompt).toContain("search_graph");
+    expect(prompt).not.toContain("Page editing rules");
+    expect(prompt).not.toContain("query_blocks");
+  });
+
+  it("uses a single list marker and no stale bullet instructions", () => {
+    const prompt = buildDefaultSystemPromptBody();
+    expect(prompt).toContain("Use '• ' lines for lists");
+    expect(prompt).not.toContain("Use '- ' bullets");
+    expect(prompt).not.toContain("Numbered lists are also flattened");
+  });
+});
+
+describe("shrinkMessagesForOverflow", () => {
+  const system: ChatMessage = { role: "system", content: "system" };
+
+  it("keeps the system prompt and drops the oldest half of plain history", () => {
+    const messages: ChatMessage[] = [
+      system,
+      { role: "user", content: "old 1" },
+      { role: "assistant", content: "old 2" },
+      { role: "user", content: "new 1" },
+      { role: "assistant", content: "new 2" },
+      { role: "user", content: "latest" },
+    ];
+    expect(shrinkMessagesForOverflow(messages)).toEqual([
+      system,
+      { role: "user", content: "new 1" },
+      { role: "assistant", content: "new 2" },
+      { role: "user", content: "latest" },
+    ]);
+  });
+
+  it("drops tool call/result pairs as a unit", () => {
+    const messages: ChatMessage[] = [
+      system,
+      { role: "user", content: "old" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            type: "function",
+            function: { name: "search_graph", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call-1", content: "result" },
+      { role: "user", content: "latest" },
+    ];
+    expect(shrinkMessagesForOverflow(messages)).toEqual([
+      system,
+      { role: "user", content: "latest" },
+    ]);
+  });
+
+  it("keeps the current request when only two plain messages remain", () => {
+    expect(
+      shrinkMessagesForOverflow([
+        system,
+        { role: "assistant", content: "old answer" },
+        { role: "user", content: "current request" },
+      ])
+    ).toEqual([system, { role: "user", content: "current request" }]);
+  });
+
+  it("does nothing when there is nothing safe to drop", () => {
+    const single: ChatMessage[] = [system, { role: "user", content: "q" }];
+    expect(shrinkMessagesForOverflow(single)).toBe(single);
   });
 });
 

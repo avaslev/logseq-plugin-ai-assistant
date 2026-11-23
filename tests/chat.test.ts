@@ -466,6 +466,7 @@ describe("skill auto-selection (F24)", () => {
   beforeEach(() => {
     resetSkillsCache();
     syncCurrentSession("ai_assistant/20261106_skill");
+    logseqMock.settings = { toolPreset: "full" };
     logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
     logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
     logseqMock.Editor.getPage.mockImplementation(async (name: string) =>
@@ -520,12 +521,21 @@ describe("skill auto-selection (F24)", () => {
   });
 
   it("omits the catalog and the tool when tools are disabled", async () => {
-    logseqMock.settings = { enableTools: false };
+    logseqMock.settings = { toolPreset: "off" };
 
     await sendMessage("help with alpha", "m");
 
     const call = chatCompletionMock.mock.calls.at(-1)![0];
     expect(call.messages[0].content).not.toContain("Available skills");
+    expect(call.tools ?? []).toHaveLength(0);
+  });
+
+  it("migrates the old enableTools=false setting to the off preset", async () => {
+    logseqMock.settings = { enableTools: false };
+
+    await sendMessage("help with alpha", "m");
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
     expect(call.tools ?? []).toHaveLength(0);
   });
 });
@@ -616,6 +626,7 @@ describe("web tools registration (F21)", () => {
 
   it("exposes web_search and fetch_page when tools are enabled", async () => {
     syncCurrentSession("ai_assistant/20261106_web");
+    logseqMock.settings = { toolPreset: "full" };
     logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
       {
         uuid: "meta",
@@ -805,5 +816,100 @@ describe("/remove confirmation (F17)", () => {
     expect(getCurrentSessionPage()).toBeNull();
     unsubscribe();
     syncCurrentSession(null);
+  });
+});
+
+describe("tool presets and context budget", () => {
+  const meta = {
+    uuid: "meta",
+    content: "AI Session\nmodel:: m\nstarted:: t",
+    children: [],
+  };
+
+  beforeEach(() => {
+    resetSkillsCache();
+    syncCurrentSession("ai_assistant/20261107_budget");
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([meta]);
+    logseqMock.Editor.appendBlockInPage.mockResolvedValue({ uuid: "thinking" });
+    logseqMock.Editor.updateBlock.mockResolvedValue(undefined);
+    logseqMock.Editor.getAllPages.mockResolvedValue([]);
+    chatCompletionMock.mockResolvedValue({
+      content: "Итог",
+      reasoning: "",
+      toolCalls: [],
+    });
+  });
+
+  afterEach(() => {
+    syncCurrentSession(null);
+    logseqMock.settings = {};
+  });
+
+  it("exposes only the four read-only tools in the lite preset", async () => {
+    logseqMock.settings = { toolPreset: "lite" };
+
+    await sendMessage("где я?", "m");
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
+    const names = (call.tools ?? []).map((tool) => tool.function.name);
+    expect(names.sort()).toEqual(
+      ["get_block", "get_page", "search_graph", "search_tasks"].sort()
+    );
+    expect(names).not.toContain("web_search");
+    expect(names).not.toContain("use_skill");
+    expect(call.messages[0].content).not.toContain("Available skills");
+  });
+
+  it("retries with a shorter history after a context overflow", async () => {
+    logseqMock.settings = { toolPreset: "off" };
+    logseqMock.Editor.getPageBlocksTree.mockResolvedValue([
+      meta,
+      { uuid: "u1", content: "первый вопрос", children: [] },
+      { uuid: "a1", content: "✦ первый ответ", children: [] },
+      { uuid: "u2", content: "второй вопрос", children: [] },
+      { uuid: "a2", content: "✦ второй ответ", children: [] },
+    ]);
+    chatCompletionMock
+      .mockRejectedValueOnce(
+        new LlmError(400, "LLM request failed: maximum context length is 8192")
+      )
+      .mockResolvedValueOnce({
+        content: "Итог",
+        reasoning: "",
+        toolCalls: [],
+      });
+
+    await sendMessage("актуальный вопрос", "m");
+
+    expect(chatCompletionMock).toHaveBeenCalledTimes(2);
+    const first = chatCompletionMock.mock.calls[0][0];
+    const second = chatCompletionMock.mock.calls[1][0];
+    expect(second.messages.length).toBeLessThan(first.messages.length);
+    expect(second.messages.at(-1)).toEqual({
+      role: "assistant",
+      content: "второй ответ",
+    });
+    expect(
+      second.messages.some(
+        (message) => message.content === "первый вопрос"
+      )
+    ).toBe(false);
+    const statuses = logseqMock.Editor.updateBlock.mock.calls.map(
+      (call) => call[1] as string
+    );
+    expect(
+      statuses.some((text) => text.includes("Context overflow, retrying"))
+    ).toBe(true);
+    expect(getSendState().phase).toBe("idle");
+  });
+
+  it("uses the configured context window for the response budget", async () => {
+    logseqMock.settings = { maxContextTokens: 2048, toolPreset: "off" };
+
+    await sendMessage("короткий вопрос", "m");
+
+    const call = chatCompletionMock.mock.calls.at(-1)![0];
+    expect(call.maxTokens).toBeGreaterThan(0);
+    expect(call.maxTokens).toBeLessThanOrEqual(2048);
   });
 });

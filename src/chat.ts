@@ -1,6 +1,7 @@
 import "@logseq/libs";
 import {
   chatCompletion,
+  isContextOverflowError,
   runToolLoop,
   stripThinkTags,
   LlmError,
@@ -9,11 +10,11 @@ import {
   type ToolCall,
 } from "./llm";
 import {
-  buildSystemPrompt,
   historyFromTree,
   markAssistantContent,
   sanitizeSessionSlug,
   sentMessagesFromTree,
+  shrinkMessagesForOverflow,
   stripAssistantMarker,
   toSingleBlockContent,
   trimHistoryToBudget,
@@ -29,7 +30,11 @@ import {
   TOOL_REPLY_TEXT,
 } from "./strings";
 import { confirmAction, onConfirmRequest } from "./confirm";
-import { estimateMessagesTokens, estimateTokens } from "./tokens";
+import {
+  calibrateTokenEstimate,
+  estimateMessagesTokens,
+  estimateTokens,
+} from "./tokens";
 import {
   buildSkillsCatalog,
   buildSkillPrompt,
@@ -40,10 +45,14 @@ import {
 } from "./skills";
 import {
   executeLogseqTool,
+} from "./logseqTools";
+import {
+  getLiteToolSpecs,
   getLogseqToolSpecs,
   getSkillToolSpecs,
   getWriteToolSpecs,
-} from "./logseqTools";
+} from "./prompts/toolSpecs";
+import { buildSystemPrompt } from "./prompts/systemPrompt";
 import { executeWebTool, getWebToolSpecs, isWebTool } from "./webTools";
 import {
   computeHistoryBudget,
@@ -65,6 +74,7 @@ export const BAR_HEIGHT = 48;
 export const SIDEBAR_DEFAULT_WIDTH = 360;
 
 const MAX_HISTORY_BLOCKS_FALLBACK = 30;
+const CONTEXT_RETRY_ATTEMPTS = 3;
 const THINKING_UPDATE_INTERVAL_MS = 1000;
 const TOOL_ARG_PREVIEW_FIELDS = [
   "query",
@@ -78,6 +88,12 @@ const TOOL_ARG_PREVIEW_FIELDS = [
   "content",
 ];
 const TOOL_ARG_PREVIEW_LIMIT = 60;
+
+// The user-set ceiling wins over detection: a wrong auto-detected window is
+// exactly the case the setting exists for.
+function effectiveContextWindow(detected: number, override: number): number {
+  return override > 0 ? override : detected;
+}
 
 function previewText(value: string): string {
   const flat = value.replace(/\s+/g, " ").trim();
@@ -210,6 +226,13 @@ export function classifyStop(err: unknown, aborted: boolean): StopInfo {
   }
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof LlmError) {
+    if (isContextOverflowError(err)) {
+      return {
+        kind: "error",
+        retryable: false,
+        text: `${ERROR_PREFIX} Context overflow: the request is larger than the model window. Lower History blocks, set Max context tokens, or run /compress.`,
+      };
+    }
     if (err.status === 0) {
       return {
         kind: "network",
@@ -807,16 +830,23 @@ export async function sendMessage(
       console.warn("[ai-assistant] failed to persist session model:", err);
     }
 
+    const preset = settings.toolPreset;
+    const fullTools = preset === "full";
     const systemOverride = await readSystemPromptOverride();
     const basePrompt = systemOverride
       ? `${systemOverride}\n\nToday's date: ${new Date().toISOString().slice(0, 10)}.`
-      : buildSystemPrompt(new Date(), settings.enableWriteTools);
+      : buildSystemPrompt(
+          new Date(),
+          fullTools && settings.enableWriteTools,
+          preset
+        );
 
     // Without an explicit /skill invocation, advertise the catalog and let
-    // the model load a skill itself via the use_skill tool (needs tools on).
+    // the model load a skill itself via the use_skill tool. Skills are one
+    // more decision for the model, so they stay in the full preset only.
     const skill = options?.skill ?? null;
     const catalog =
-      skill == null && settings.enableTools
+      skill == null && fullTools
         ? buildSkillsCatalog(await listSkills())
         : "";
     const systemPrompt = [
@@ -827,24 +857,30 @@ export async function sendMessage(
       .filter(Boolean)
       .join("\n\n");
 
-    const tools = settings.enableTools
-      ? [
-          ...getLogseqToolSpecs(),
-          ...getWebToolSpecs(),
-          ...(settings.enableWriteTools ? getWriteToolSpecs() : []),
-          ...(catalog ? getSkillToolSpecs() : []),
-          ...(await getMcpToolSpecs(
-            parseMcpServers(settings.mcpServers),
-            { signal }
-          )),
-        ]
-      : [];
+    const tools =
+      preset === "off"
+        ? []
+        : fullTools
+          ? [
+              ...getLogseqToolSpecs(),
+              ...getWebToolSpecs(),
+              ...(settings.enableWriteTools ? getWriteToolSpecs() : []),
+              ...(catalog ? getSkillToolSpecs() : []),
+              ...(await getMcpToolSpecs(
+                parseMcpServers(settings.mcpServers),
+                { signal }
+              )),
+            ]
+          : getLiteToolSpecs();
 
-    const contextWindow = await detectContextWindow(
-      settings.apiBaseUrl,
-      settings.apiKey,
-      model,
-      signal
+    const contextWindow = effectiveContextWindow(
+      await detectContextWindow(
+        settings.apiBaseUrl,
+        settings.apiKey,
+        model,
+        signal
+      ),
+      settings.maxContextTokens
     );
     const toolsTokens =
       tools.length > 0 ? estimateTokens(JSON.stringify(tools)) : 0;
@@ -910,39 +946,58 @@ export async function sendMessage(
       msgs: ChatMessage[],
       withTools = true
     ): Promise<ChatResult> => {
-      const attempt = (): Promise<ChatResult> => {
+      let current = msgs;
+      let transientRetried = false;
+      let contextRetries = 0;
+      for (;;) {
         const promptTokens =
-          estimateMessagesTokens(msgs) + (withTools ? toolsTokens : 0);
-        return chatCompletion({
-          baseUrl: settings.apiBaseUrl,
-          apiKey: settings.apiKey,
-          model,
-          messages: msgs,
-          tools: withTools ? tools : [],
-          maxTokens: computeResponseTokenBudget(contextWindow, promptTokens),
-          signal,
-          onDelta: (text) => {
-            contentAccum = text;
-            updateAnswerBlock();
-          },
-        });
-      };
-      try {
-        return await attempt();
-      } catch (err) {
-        const transient =
-          err instanceof LlmError
-            ? err.status === 0 || err.status >= 500
-            : !(err instanceof Error && err.name === "AbortError") &&
-              !signal.aborted;
-        if (!transient || signal.aborted) throw err;
-        setStatus(
-          err instanceof LlmError && err.status > 0
-            ? `💭 Retrying (HTTP ${err.status})…`
-            : "💭 Retrying (network)…"
-        );
-        await abortableDelay(1500, signal);
-        return await attempt();
+          estimateMessagesTokens(current) + (withTools ? toolsTokens : 0);
+        try {
+          const result = await chatCompletion({
+            baseUrl: settings.apiBaseUrl,
+            apiKey: settings.apiKey,
+            model,
+            messages: current,
+            tools: withTools ? tools : [],
+            maxTokens: computeResponseTokenBudget(contextWindow, promptTokens),
+            signal,
+            onDelta: (text) => {
+              contentAccum = text;
+              updateAnswerBlock();
+            },
+          });
+          if (result.usage?.promptTokens) {
+            calibrateTokenEstimate(promptTokens, result.usage.promptTokens);
+          }
+          return result;
+        } catch (err) {
+          if (signal.aborted) throw err;
+          if (
+            isContextOverflowError(err) &&
+            contextRetries < CONTEXT_RETRY_ATTEMPTS
+          ) {
+            const shrunk = shrinkMessagesForOverflow(current);
+            if (shrunk.length < current.length) {
+              contextRetries += 1;
+              current = shrunk;
+              contentAccum = "";
+              setStatus("💭 Context overflow, retrying with less history…");
+              continue;
+            }
+          }
+          const transient =
+            err instanceof LlmError
+              ? err.status === 0 || err.status >= 500
+              : !(err instanceof Error && err.name === "AbortError");
+          if (!transient || transientRetried) throw err;
+          transientRetried = true;
+          setStatus(
+            err instanceof LlmError && err.status > 0
+              ? `💭 Retrying (HTTP ${err.status})…`
+              : "💭 Retrying (network)…"
+          );
+          await abortableDelay(1500, signal);
+        }
       }
     };
 
@@ -962,6 +1017,10 @@ export async function sendMessage(
               ? `💭 Wrap-up → ${model}`
               : `💭 Request ${event.iteration} → ${model}`
           );
+          return;
+        }
+        if (event.type === "repeat") {
+          setStatus(`🔁 Loop detected: ${event.signature}`);
           return;
         }
         const name = event.call.function.name;
@@ -988,8 +1047,10 @@ export async function sendMessage(
       failedMessage: null,
       continuation: null,
       usage: {
-        contextTokens: estimateMessagesTokens(loop.messages),
-        outputTokens: estimateTokens(loop.content),
+        contextTokens:
+          loop.usage?.promptTokens || estimateMessagesTokens(loop.messages),
+        outputTokens:
+          loop.usage?.completionTokens || estimateTokens(loop.content),
       },
     });
     if (!replyText) {
@@ -1099,15 +1160,23 @@ export async function continueGeneration(): Promise<void> {
       tree,
       settings.historyBlocks || MAX_HISTORY_BLOCKS_FALLBACK
     );
+    const preset = settings.toolPreset;
     const systemOverride = await readSystemPromptOverride();
     const basePrompt = systemOverride
       ? `${systemOverride}\n\nToday's date: ${new Date().toISOString().slice(0, 10)}.`
-      : buildSystemPrompt(new Date(), settings.enableWriteTools);
-    const contextWindow = await detectContextWindow(
-      settings.apiBaseUrl,
-      settings.apiKey,
-      continuation.model,
-      signal
+      : buildSystemPrompt(
+          new Date(),
+          preset === "full" && settings.enableWriteTools,
+          preset
+        );
+    const contextWindow = effectiveContextWindow(
+      await detectContextWindow(
+        settings.apiBaseUrl,
+        settings.apiKey,
+        continuation.model,
+        signal
+      ),
+      settings.maxContextTokens
     );
     const trimmedHistory = trimHistoryToBudget(
       history,
@@ -1128,6 +1197,9 @@ export async function continueGeneration(): Promise<void> {
       signal,
     });
     signal.throwIfAborted();
+    if (result.usage?.promptTokens) {
+      calibrateTokenEstimate(promptTokens, result.usage.promptTokens);
+    }
     const extra = toSingleBlockContent(stripThinkTags(result.content)).trim();
     if (extra) {
       const block = await logseq.Editor.getBlock(continuation.blockUuid);
@@ -1154,8 +1226,9 @@ export async function continueGeneration(): Promise<void> {
             }
           : null,
       usage: {
-        contextTokens: promptTokens,
-        outputTokens: estimateTokens(result.content),
+        contextTokens: result.usage?.promptTokens || promptTokens,
+        outputTokens:
+          result.usage?.completionTokens || estimateTokens(result.content),
       },
     });
     await refreshAnswerBlockRender();

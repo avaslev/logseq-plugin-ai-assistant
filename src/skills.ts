@@ -1,5 +1,6 @@
 import "@logseq/libs";
-import { buildDefaultSystemPromptBody, sanitizeSessionSlug } from "./format";
+import { sanitizeSessionSlug } from "./format";
+import { buildDefaultSystemPromptBody } from "./prompts/systemPrompt";
 
 // Skills and the user-editable system prompt live in the graph (F18):
 // - ai_assistant/system          — optional system prompt override

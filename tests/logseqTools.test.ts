@@ -7,9 +7,6 @@ import {
   executeLogseqTool,
   filterBlocks,
   filterPageNames,
-  getLogseqToolSpecs,
-  getSkillToolSpecs,
-  getWriteToolSpecs,
   journalDayNumber,
   journalRowsToBlocks,
   parseJournalDate,
@@ -19,6 +16,11 @@ import {
   searchJournal,
   searchTasks,
 } from "../src/logseqTools";
+import {
+  getLogseqToolSpecs,
+  getSkillToolSpecs,
+  getWriteToolSpecs,
+} from "../src/prompts/toolSpecs";
 
 function mockLogseqEditor(editor: Record<string, unknown>): void {
   (globalThis as { logseq?: unknown }).logseq = {
@@ -82,10 +84,7 @@ describe("tool specs", () => {
       "search_graph",
       "search_tasks",
       "get_page",
-      "get_page_blocks",
       "get_block",
-      "get_block_subtree",
-      "get_current_page",
       "get_selected_blocks",
       "query_blocks",
       "search_journal",
@@ -95,7 +94,7 @@ describe("tool specs", () => {
 
   it("requires arguments for search and lookups", () => {
     for (const spec of specs) {
-      if (spec.function.name === "get_current_page") continue;
+      if (spec.function.name === "get_page") continue;
       if (spec.function.name === "get_selected_blocks") continue;
       if (spec.function.name === "search_tasks") continue;
       if (spec.function.name === "search_journal") continue;
