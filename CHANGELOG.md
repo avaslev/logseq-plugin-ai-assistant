@@ -1,3 +1,10 @@
+# [0.13.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.12.0...v0.13.0) (2026-11-23)
+
+
+### Features
+
+* give the tool loop room to finish and stop it only when stuck ([d355456](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/d355456ad9dbed42b78ed186898c0f96f30788af))
+
 # [0.12.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.11.0...v0.12.0) (2026-11-23)
 
 
