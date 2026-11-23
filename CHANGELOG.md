@@ -1,3 +1,11 @@
+# [0.12.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.11.0...v0.12.0) (2026-11-23)
+
+
+### Features
+
+* harden tool calls with argument repair, output compaction and loop detection ([1f41f38](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/1f41f38d67463af15b6b6ba83b71c0c0488c9448))
+* merge graph read tools, slim tool specs and move prompts to src/prompts ([06a3bd6](https://github.com/avaslev/logseq-plugin-ai-assistant/commit/06a3bd6f235b2e557492c38f404f4f822807696c))
+
 # [0.11.0](https://github.com/avaslev/logseq-plugin-ai-assistant/compare/v0.10.3...v0.11.0) (2026-11-17)
 
 
