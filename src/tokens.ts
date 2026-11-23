@@ -7,6 +7,36 @@ import type { ChatMessage } from "./llm";
 const LATIN_CHARS_PER_TOKEN = 4;
 const CYRILLIC_CHARS_PER_TOKEN = 2.5;
 
+// Providers report the real prompt size in `usage.prompt_tokens`. The heuristic
+// above underestimates JSON/uuid-heavy text, so a factor learned from real
+// usage keeps the budget honest on small context windows. It starts at 1 and
+// is corrected gradually, so a single odd response cannot swing it.
+const MIN_CALIBRATION = 0.5;
+const MAX_CALIBRATION = 4;
+
+let calibration = 1;
+
+export function resetTokenCalibration(): void {
+  calibration = 1;
+}
+
+export function getTokenCalibration(): number {
+  return calibration;
+}
+
+// Feeds a real prompt-token count back into the estimator. `estimated` must be
+// the value the estimator returned for the same prompt (calibration included).
+export function calibrateTokenEstimate(
+  estimated: number,
+  actual: number
+): void {
+  if (estimated <= 0 || actual <= 0) return;
+  const ratio = actual / estimated;
+  if (!Number.isFinite(ratio)) return;
+  const next = calibration * Math.sqrt(ratio);
+  calibration = Math.min(MAX_CALIBRATION, Math.max(MIN_CALIBRATION, next));
+}
+
 function isCyrillic(ch: string): boolean {
   return /[А-Яа-яЁё]/.test(ch);
 }
@@ -21,7 +51,7 @@ export function estimateTokens(text: string): number {
   }
   const tokens =
     other / LATIN_CHARS_PER_TOKEN + cyrillic / CYRILLIC_CHARS_PER_TOKEN;
-  return Math.ceil(tokens);
+  return Math.ceil(tokens * calibration);
 }
 
 function messageContent(message: ChatMessage): string {

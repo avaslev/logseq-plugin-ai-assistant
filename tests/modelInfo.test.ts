@@ -97,6 +97,20 @@ describe("findModelContext", () => {
     ).toBe(4096);
   });
 
+  it("returns null instead of borrowing another model's window", () => {
+    expect(
+      findModelContext(
+        {
+          data: [
+            { id: "big-model", context_length: 200000 },
+            { id: "small-model", context_length: 8192 },
+          ],
+        },
+        "unknown"
+      )
+    ).toBeNull();
+  });
+
   it("returns null when nothing is reported", () => {
     expect(findModelContext({ data: [{ id: "m" }] }, "m")).toBeNull();
     expect(findModelContext(null, "m")).toBeNull();

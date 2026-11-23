@@ -4,6 +4,8 @@ import {
   TimeoutError,
   withTimeout,
 } from "./http";
+import { repairToolCall } from "./toolArgs";
+import { compactToolOutput } from "./toolOutput";
 
 export interface ToolSpec {
   type: "function";
@@ -33,6 +35,13 @@ export interface ChatResult {
   toolCalls: ToolCall[];
   // "stop", "length", "tool_calls", etc. as reported by the provider.
   finishReason?: string | null;
+  // Real token counts when the provider reports them.
+  usage?: TokenUsage | null;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
 }
 
 export class LlmError extends Error {
@@ -43,6 +52,20 @@ export class LlmError extends Error {
     super(message);
   }
 }
+
+const CONTEXT_OVERFLOW_PATTERN =
+  /context (?:length|window|size)|maximum context|max(?:imum)? (?:model )?(?:context|tokens)|too many tokens|prompt is too long|input (?:is )?too long|exceeds?[^.]*(?:context|token)|reduce[^.]*(?:tokens|length)/i;
+
+// Providers signal an oversized prompt in different ways (400/413 with a text
+// explanation). Recognising it lets the caller shrink the history and retry
+// instead of failing the whole turn.
+export function isContextOverflowError(err: unknown): boolean {
+  if (!(err instanceof LlmError)) return false;
+  if (err.status === 413) return true;
+  if (err.status !== 400) return false;
+  return CONTEXT_OVERFLOW_PATTERN.test(err.message);
+}
+
 
 export function pickModel(
   requested: string | null,
@@ -152,6 +175,13 @@ function partialTagPrefixLength(text: string): number {
   return 0;
 }
 
+function readTokenCount(value: unknown): number {
+  const num = typeof value === "string" ? Number(value) : value;
+  return typeof num === "number" && Number.isFinite(num) && num > 0
+    ? Math.floor(num)
+    : 0;
+}
+
 export function createStreamAccumulator(
   onDelta: (text: string) => void,
   onReasoning?: (text: string) => void
@@ -161,6 +191,7 @@ export function createStreamAccumulator(
   let inThink = false;
   let pending = "";
   let finishReason: string | null = null;
+  let usage: TokenUsage | null = null;
   const toolCalls = new Map<number, ToolCall>();
 
   const emitVisible = (text: string): void => {
@@ -222,11 +253,33 @@ export function createStreamAccumulator(
           finish_reason?: unknown;
         }>;
         done_reason?: unknown;
+        usage?: unknown;
+        prompt_eval_count?: unknown;
+        eval_count?: unknown;
       };
       try {
         chunk = JSON.parse(payload);
       } catch {
         return;
+      }
+      // OpenAI-compatible servers put counts in `usage`, Ollama's native
+      // shape uses prompt_eval_count/eval_count on the same stream.
+      if (chunk.usage && typeof chunk.usage === "object") {
+        const raw = chunk.usage as Record<string, unknown>;
+        const promptTokens = readTokenCount(
+          raw.prompt_tokens ?? raw.input_tokens
+        );
+        const completionTokens = readTokenCount(
+          raw.completion_tokens ?? raw.output_tokens
+        );
+        if (promptTokens > 0 || completionTokens > 0) {
+          usage = { promptTokens, completionTokens };
+        }
+      }
+      const promptEval = readTokenCount(chunk.prompt_eval_count);
+      const evalCount = readTokenCount(chunk.eval_count);
+      if (promptEval > 0 || evalCount > 0) {
+        usage = { promptTokens: promptEval, completionTokens: evalCount };
       }
       const choice = chunk.choices?.[0];
       if (typeof choice?.finish_reason === "string" && choice.finish_reason) {
@@ -289,6 +342,7 @@ export function createStreamAccumulator(
           (call) => call.function.name.length > 0
         ),
         finishReason,
+        usage,
       };
     },
   };
@@ -311,37 +365,62 @@ export interface ChatCompletionOptions {
 export async function chatCompletion(
   opts: ChatCompletionOptions
 ): Promise<ChatResult> {
-  let res: Response;
-  try {
-    res = await fetchWithTimeout(
-      joinUrl(opts.baseUrl, "chat/completions"),
-      {
-        method: "POST",
-        headers: authHeaders(opts.apiKey),
-        body: JSON.stringify({
-          model: opts.model,
-          messages: opts.messages,
-          tools: opts.tools && opts.tools.length > 0 ? opts.tools : undefined,
-          max_tokens:
-            opts.maxTokens && opts.maxTokens > 0
-              ? Math.floor(opts.maxTokens)
-              : undefined,
-          stream: true,
-        }),
-        signal: opts.signal,
-      },
-      {
-        signal: opts.signal,
-        timeoutMs: opts.timeoutMs ?? LLM_CONNECT_TIMEOUT_MS,
-      }
-    );
-  } catch (err) {
-    if (err instanceof TimeoutError) throw new LlmError(0, err.message);
-    throw err;
-  }
+  const post = async (includeUsage: boolean): Promise<Response> => {
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      messages: opts.messages,
+      tools: opts.tools && opts.tools.length > 0 ? opts.tools : undefined,
+      max_tokens:
+        opts.maxTokens && opts.maxTokens > 0
+          ? Math.floor(opts.maxTokens)
+          : undefined,
+      stream: true,
+    };
+    // Ask for the real token counts. Servers that do not know the field are
+    // retried without it below, so this never makes an otherwise working
+    // server fail.
+    if (includeUsage) body.stream_options = { include_usage: true };
+    try {
+      return await fetchWithTimeout(
+        joinUrl(opts.baseUrl, "chat/completions"),
+        {
+          method: "POST",
+          headers: authHeaders(opts.apiKey),
+          body: JSON.stringify(body),
+          signal: opts.signal,
+        },
+        {
+          signal: opts.signal,
+          timeoutMs: opts.timeoutMs ?? LLM_CONNECT_TIMEOUT_MS,
+        }
+      );
+    } catch (err) {
+      if (err instanceof TimeoutError) throw new LlmError(0, err.message);
+      throw err;
+    }
+  };
+
+  let res = await post(true);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new LlmError(res.status, `LLM request failed: ${extractErrorMessage(res.status, text)}`);
+    if (
+      res.status === 400 &&
+      /stream_options|unknown field|extra fields|unrecognized/i.test(text)
+    ) {
+      res = await post(false);
+      if (!res.ok) {
+        const retryText = await res.text().catch(() => "");
+        throw new LlmError(
+          res.status,
+          `LLM request failed: ${extractErrorMessage(res.status, retryText)}`
+        );
+      }
+    } else {
+      throw new LlmError(
+        res.status,
+        `LLM request failed: ${extractErrorMessage(res.status, text)}`
+      );
+    }
   }
   if (!res.body) throw new LlmError(0, "LLM response has no body");
 
@@ -383,6 +462,11 @@ export async function chatCompletion(
 export const TOOL_ROUNDS_EXHAUSTED_PROMPT =
   "The tool round budget is exhausted. Do not call any more tools. Briefly report what you actually changed or found so far and what remains unfinished.";
 
+const TOOL_REPEAT_PROMPT =
+  "You repeated the same tool call. Stop using tools now and answer briefly using the results you already have. If something remains unknown, say so.";
+const REPEAT_CALL_LIMIT = 3;
+const REPEAT_CYCLE_LENGTH = 4;
+
 export type ToolLoopEvent =
   | {
       type: "request";
@@ -391,7 +475,8 @@ export type ToolLoopEvent =
       wrapUp?: boolean;
     }
   | { type: "tool-start"; call: ToolCall }
-  | { type: "tool-end"; call: ToolCall; ok: boolean; outputLength: number };
+  | { type: "tool-end"; call: ToolCall; ok: boolean; outputLength: number }
+  | { type: "repeat"; signature: string };
 
 export interface ToolLoopOptions {
   messages: ChatMessage[];
@@ -413,7 +498,49 @@ export interface ToolLoopResult {
   toolCalls: ToolCall[];
   iterations: number;
   roundsExhausted: boolean;
+  repeated: boolean;
   finishReason?: string | null;
+  usage?: TokenUsage | null;
+}
+
+function stableValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableValue(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function callSignature(call: ToolCall): string {
+  let args = call.function.arguments;
+  try {
+    args = stableValue(JSON.parse(args) as unknown);
+  } catch {
+    // Keep the raw string when the arguments are not JSON.
+  }
+  return `${call.function.name}:${args}`;
+}
+
+function noteRepeat(
+  signature: string,
+  counts: Map<string, number>,
+  history: string[]
+): boolean {
+  counts.set(signature, (counts.get(signature) ?? 0) + 1);
+  history.push(signature);
+  if ((counts.get(signature) ?? 0) >= REPEAT_CALL_LIMIT) return true;
+  if (history.length >= REPEAT_CYCLE_LENGTH) {
+    const tail = history.slice(-REPEAT_CYCLE_LENGTH);
+    if (tail[0] === tail[2] && tail[1] === tail[3] && tail[0] !== tail[1]) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export async function runToolLoop(
@@ -421,8 +548,11 @@ export async function runToolLoop(
 ): Promise<ToolLoopResult> {
   const messages = [...opts.messages];
   const maxIterations = opts.maxIterations ?? 5;
+  const callCounts = new Map<string, number>();
+  const callHistory: string[] = [];
   let result: ChatResult = { content: "", reasoning: "", toolCalls: [] };
   let iterations = 0;
+  let repeated = false;
 
   while (iterations < maxIterations) {
     opts.signal?.throwIfAborted();
@@ -435,44 +565,69 @@ export async function runToolLoop(
     iterations += 1;
     if (result.toolCalls.length === 0) break;
 
-    messages.push({
-      role: "assistant",
-      content: result.content || null,
-      tool_calls: result.toolCalls,
-    });
-    for (const call of result.toolCalls) {
+    const calls = result.toolCalls.map((call) => repairToolCall(call, opts.tools));
+    const executed: ToolCall[] = [];
+
+    for (const { call, error } of calls) {
       opts.signal?.throwIfAborted();
+      executed.push(call);
       opts.onEvent?.({ type: "tool-start", call });
+      const signature = callSignature(call);
       let output: string;
-      try {
-        output = await opts.execTool(call, opts.signal);
-      } catch (err) {
-        opts.signal?.throwIfAborted();
-        output = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
+      let ok = true;
+      if (error) {
+        // Bad arguments never reach the tool: tell the model what to fix.
+        output = error;
+        ok = false;
+      } else if (noteRepeat(signature, callCounts, callHistory)) {
+        repeated = true;
+        output = `Repeated identical call: ${signature}. Stop calling tools and answer from the results you already have.`;
+        ok = false;
+        opts.onEvent?.({ type: "repeat", signature });
+      } else {
+        try {
+          output = await opts.execTool(call, opts.signal);
+        } catch (err) {
+          opts.signal?.throwIfAborted();
+          output = `Tool error: ${err instanceof Error ? err.message : String(err)}`;
+          ok = false;
+        }
       }
       opts.signal?.throwIfAborted();
+      const toolText = compactToolOutput(output);
       opts.onEvent?.({
         type: "tool-end",
         call,
-        ok: !output.startsWith("Tool error:"),
-        outputLength: output.length,
+        ok,
+        outputLength: toolText.length,
       });
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: output.slice(0, 8000),
+        content: toolText,
       });
+      if (repeated) break;
     }
+    // Only the calls that actually got a tool result go into the transcript.
+    // Skipped calls would leave dangling tool_calls without results.
+    messages.push({
+      role: "assistant",
+      content: result.content || null,
+      tool_calls: executed,
+    });
+    if (repeated) break;
   }
 
-  // The loop exited with pending tool calls: the round budget ran out after
-  // the last round's tools executed but before the model saw their results.
-  // Make one final request without tools so the model reports honestly
-  // instead of leaving the answer empty ("completed with tools").
+  // The loop exited with pending tool calls: either the round budget ran out
+  // or the model got stuck repeating itself. Make one final request without
+  // tools so it reports honestly instead of leaving the answer empty.
   let roundsExhausted = false;
-  if (result.toolCalls.length > 0) {
-    roundsExhausted = true;
-    messages.push({ role: "user", content: TOOL_ROUNDS_EXHAUSTED_PROMPT });
+  if (repeated || result.toolCalls.length > 0) {
+    roundsExhausted = !repeated && result.toolCalls.length > 0;
+    messages.push({
+      role: "user",
+      content: repeated ? TOOL_REPEAT_PROMPT : TOOL_ROUNDS_EXHAUSTED_PROMPT,
+    });
     opts.onEvent?.({
       type: "request",
       iteration: iterations + 1,
@@ -491,6 +646,8 @@ export async function runToolLoop(
     toolCalls: result.toolCalls,
     iterations,
     roundsExhausted,
+    repeated,
     finishReason: result.finishReason ?? null,
+    usage: result.usage ?? null,
   };
 }

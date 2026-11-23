@@ -1,9 +1,10 @@
 import { createServer, type Server } from "node:http";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chatCompletion,
   createStreamAccumulator,
   filterChatModels,
+  isContextOverflowError,
   listModels,
   LlmError,
   pickModel,
@@ -259,6 +260,59 @@ describe("createStreamAccumulator", () => {
       },
     ]);
   });
+  it("captures usage from OpenAI-compatible chunks", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(
+      sseEvent({
+        choices: [{ delta: { content: "hi" } }],
+        usage: { prompt_tokens: 120, completion_tokens: 7 },
+      })
+    );
+    expect(acc.result().usage).toEqual({
+      promptTokens: 120,
+      completionTokens: 7,
+    });
+  });
+
+  it("captures Ollama prompt_eval_count/eval_count", () => {
+    const acc = createStreamAccumulator(() => {});
+    acc.processLine(
+      sseEvent({
+        choices: [{ delta: { content: "hi" } }],
+        prompt_eval_count: 64,
+        eval_count: 3,
+      })
+    );
+    expect(acc.result().usage).toEqual({
+      promptTokens: 64,
+      completionTokens: 3,
+    });
+  });
+});
+
+describe("isContextOverflowError", () => {
+  it("recognises provider overflow messages", () => {
+    expect(
+      isContextOverflowError(
+        new LlmError(400, "LLM request failed: maximum context length is 8192")
+      )
+    ).toBe(true);
+    expect(
+      isContextOverflowError(
+        new LlmError(400, "the input length exceeds the context length")
+      )
+    ).toBe(true);
+    expect(isContextOverflowError(new LlmError(413, "too large"))).toBe(true);
+  });
+
+  it("ignores unrelated errors", () => {
+    expect(isContextOverflowError(new LlmError(401, "unauthorized"))).toBe(
+      false
+    );
+    expect(isContextOverflowError(new Error("maximum context length"))).toBe(
+      false
+    );
+  });
 });
 
 describe("pickModel", () => {
@@ -343,6 +397,7 @@ describe("chatCompletion streaming", () => {
     expect(result.content).toBe("Hello world");
     expect(deltas).toEqual(["Hel", "Hello world"]);
     expect(receivedBodies[0].stream).toBe(true);
+    expect(receivedBodies[0].stream_options).toEqual({ include_usage: true });
     expect(receivedBodies[0].model).toBe("model-a");
     expect(receivedBodies[0].max_tokens).toBeUndefined();
   });
@@ -495,7 +550,19 @@ describe("runToolLoop", () => {
     let calls = 0;
     const send = async () => {
       calls += 1;
-      return { content: "", toolCalls: [{ ...loopingCall }] };
+      return {
+        content: "",
+        toolCalls: [
+          {
+            ...loopingCall,
+            id: `call_loop_${calls}`,
+            function: {
+              ...loopingCall.function,
+              arguments: JSON.stringify({ i: calls }),
+            },
+          },
+        ],
+      };
     };
     const sendFinalMessages: ChatMessage[][] = [];
     const sendFinal = async (messages: ChatMessage[]) => {
@@ -615,5 +682,127 @@ describe("runToolLoop", () => {
 
     const end = events.find((event) => event.type === "tool-end");
     expect(end).toMatchObject({ ok: false });
+  });
+
+  const searchSpec = {
+    type: "function" as const,
+    function: {
+      name: "search_graph",
+      description: "search",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number" },
+        },
+        required: ["query"],
+      },
+    },
+  };
+
+  it("repairs fenced JSON and coerces argument types", async () => {
+    let received = "";
+    await runToolLoop({
+      messages: [{ role: "user", content: "find logseq" }],
+      tools: [searchSpec],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: {
+              name: "search_graph",
+              arguments: '```json\n{"query":"logseq","limit":"5",}\n```',
+            },
+          },
+        ],
+      }),
+      execTool: async (call) => {
+        received = call.function.arguments;
+        return "ok";
+      },
+    });
+    expect(JSON.parse(received)).toEqual({ query: "logseq", limit: 5 });
+  });
+
+  it("returns a validation error instead of calling a tool with missing fields", async () => {
+    const execTool = vi.fn(async () => "ok");
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "find logseq" }],
+      tools: [searchSpec],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "search_graph", arguments: "{}" },
+          },
+        ],
+      }),
+      execTool,
+    });
+    expect(execTool).not.toHaveBeenCalled();
+    const toolMessage = loop.messages.find((m) => m.role === "tool");
+    expect(toolMessage?.content).toContain('missing required "query"');
+    expect(toolMessage?.content).toContain("Expected: query: string (required)");
+  });
+
+  it("compacts long tool results before returning them to the model", async () => {
+    const raw = JSON.stringify({
+      blocks: Array.from({ length: 50 }, (_, i) => ({
+        uuid: `u${i}`,
+        content: "x".repeat(2000),
+      })),
+    });
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "find logseq" }],
+      tools: [],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "search_graph", arguments: "{}" },
+          },
+        ],
+      }),
+      execTool: async () => raw,
+    });
+    const toolMessage = loop.messages.find((m) => m.role === "tool")!;
+    expect(toolMessage.content!.length).toBeLessThan(raw.length);
+    expect(toolMessage.content).toContain("more items");
+    expect(toolMessage.content).toContain("truncated");
+    expect(() => JSON.parse(toolMessage.content!)).not.toThrow();
+  });
+
+  it("detects repeated tool calls and forces a final answer", async () => {
+    const events: ToolLoopEvent[] = [];
+    const execTool = vi.fn(async () => "same result");
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "find logseq" }],
+      tools: [],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "search_graph", arguments: '{"query":"x"}' },
+          },
+        ],
+      }),
+      sendFinal: async () => ({ content: "Here is what I found", toolCalls: [] }),
+      execTool,
+      onEvent: (event) => events.push(event),
+    });
+    expect(execTool).toHaveBeenCalledTimes(2);
+    expect(loop.repeated).toBe(true);
+    expect(loop.roundsExhausted).toBe(false);
+    expect(loop.content).toBe("Here is what I found");
+    expect(events.some((event) => event.type === "repeat")).toBe(true);
+    expect(loop.messages.at(-1)?.content).toContain("Stop using tools");
   });
 });

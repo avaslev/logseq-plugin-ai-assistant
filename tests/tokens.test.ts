@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  calibrateTokenEstimate,
   estimateMessagesTokens,
   estimateTokens,
   formatTokenCount,
+  getTokenCalibration,
+  resetTokenCalibration,
 } from "../src/tokens";
 
 describe("estimateTokens", () => {
@@ -56,6 +59,33 @@ describe("estimateMessagesTokens", () => {
     expect(
       estimateMessagesTokens([{ role: "assistant", content: null }])
     ).toBe(4);
+  });
+});
+
+describe("token calibration", () => {
+  afterEach(() => {
+    resetTokenCalibration();
+  });
+
+  it("starts at 1 and raises the estimate when usage is larger", () => {
+    expect(getTokenCalibration()).toBe(1);
+    const before = estimateTokens("a".repeat(40));
+    calibrateTokenEstimate(before, before * 2);
+    expect(getTokenCalibration()).toBeGreaterThan(1);
+    expect(estimateTokens("a".repeat(40))).toBeGreaterThan(before);
+  });
+
+  it("ignores zero or negative values", () => {
+    calibrateTokenEstimate(0, 100);
+    calibrateTokenEstimate(100, 0);
+    expect(getTokenCalibration()).toBe(1);
+  });
+
+  it("never swings beyond sane bounds", () => {
+    for (let i = 0; i < 50; i += 1) calibrateTokenEstimate(1, 1000);
+    expect(getTokenCalibration()).toBeLessThanOrEqual(4);
+    for (let i = 0; i < 50; i += 1) calibrateTokenEstimate(1000, 1);
+    expect(getTokenCalibration()).toBeGreaterThanOrEqual(0.5);
   });
 });
 

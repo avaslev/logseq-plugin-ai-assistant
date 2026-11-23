@@ -80,7 +80,11 @@ export function findModelContext(
   const named = items.filter(
     (item) => typeof item.id === "string" && matchesModel(item.id, model)
   );
-  const candidates = named.length > 0 ? named : items;
+  // Never borrow the window of an unrelated model: a proxy that lists many
+  // models would otherwise report the largest one and the plugin would build
+  // prompts far beyond the window the requested model actually has. The only
+  // safe fallback is a server that lists exactly one model.
+  const candidates = named.length > 0 ? named : items.length === 1 ? items : [];
   for (const item of candidates) {
     const value = readContextFields(item);
     if (value) return value;
