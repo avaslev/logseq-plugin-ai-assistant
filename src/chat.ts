@@ -4,6 +4,7 @@ import {
   isContextOverflowError,
   runToolLoop,
   stripThinkTags,
+  STALL_ROUND_LIMIT,
   LlmError,
   type ChatMessage,
   type ChatResult,
@@ -1021,6 +1022,12 @@ export async function sendMessage(
         }
         if (event.type === "repeat") {
           setStatus(`🔁 Loop detected: ${event.signature}`);
+          return;
+        }
+        if (event.type === "stall") {
+          setStatus(
+            `⏸ No progress (${event.rounds}/${STALL_ROUND_LIMIT})`
+          );
           return;
         }
         const name = event.call.function.name;

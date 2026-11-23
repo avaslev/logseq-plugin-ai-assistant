@@ -7,7 +7,7 @@
 import { fetchWithTimeout, readResponseText } from "./http";
 
 export const FALLBACK_CONTEXT_WINDOW = 32768;
-export const MAX_TOOL_ROUNDS = 24;
+export const MAX_TOOL_ROUNDS = 48;
 export const ANSWER_RESERVE_TOKENS = 2048;
 export const MIN_RESPONSE_TOKENS = 256;
 export const MAX_RESPONSE_TOKENS = 8192;
@@ -254,9 +254,14 @@ export function computeMaxToolRounds(
 ): number {
   const available = contextWindow - promptTokens - ANSWER_RESERVE_TOKENS;
   if (available < ROUND_COST_TOKENS) return 1;
+  // The result is a runaway guard, not a context estimate: rounds may exceed
+  // the context math because overflow is handled by the shrink retry and
+  // tool outputs are compacted. Allow roughly three context-estimates of
+  // rounds so long but productive runs are not cut off; the loop detectors
+  // stop genuinely stuck models much earlier.
   return Math.max(
     1,
-    Math.min(MAX_TOOL_ROUNDS, Math.floor(available / ROUND_COST_TOKENS))
+    Math.min(MAX_TOOL_ROUNDS, Math.floor(available / ROUND_COST_TOKENS) * 3)
   );
 }
 

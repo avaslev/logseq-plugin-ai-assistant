@@ -18,6 +18,7 @@ export function buildDefaultSystemPromptBody(
     ? [
         "Behavior rules:",
         "- Search the graph (search_graph) before asking the user for details.",
+        "- Make several independent tool calls in one round instead of waiting for each result.",
         `- If a read is partial (totalBlocks or more likely), fetch the rest with ${
           preset === "full"
             ? "query_blocks, get_page, get_block"

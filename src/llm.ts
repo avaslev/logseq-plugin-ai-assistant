@@ -460,10 +460,18 @@ export async function chatCompletion(
 }
 
 export const TOOL_ROUNDS_EXHAUSTED_PROMPT =
-  "The tool round budget is exhausted. Do not call any more tools. Briefly report what you actually changed or found so far and what remains unfinished.";
+  "The tool round budget is exhausted. Do not call any more tools. If the task is essentially done, give the result; otherwise briefly report what you actually changed or found so far and what remains unfinished.";
 
 const TOOL_REPEAT_PROMPT =
   "You repeated the same tool call. Stop using tools now and answer briefly using the results you already have. If something remains unknown, say so.";
+
+const TOOL_STALL_PROMPT =
+  "Your last tool rounds added nothing new. Stop calling tools and give a brief answer from the results you already have; mention what could not be done.";
+
+// Rounds in a row without any first-time tool execution before the loop is
+// considered stuck (repeated calls, schema failures, unchanged re-reads).
+export const STALL_ROUND_LIMIT = 3;
+
 const REPEAT_CALL_LIMIT = 3;
 const REPEAT_CYCLE_LENGTH = 4;
 
@@ -476,7 +484,8 @@ export type ToolLoopEvent =
     }
   | { type: "tool-start"; call: ToolCall }
   | { type: "tool-end"; call: ToolCall; ok: boolean; outputLength: number }
-  | { type: "repeat"; signature: string };
+  | { type: "repeat"; signature: string }
+  | { type: "stall"; rounds: number };
 
 export interface ToolLoopOptions {
   messages: ChatMessage[];
@@ -499,6 +508,7 @@ export interface ToolLoopResult {
   iterations: number;
   roundsExhausted: boolean;
   repeated: boolean;
+  stalled: boolean;
   finishReason?: string | null;
   usage?: TokenUsage | null;
 }
@@ -550,9 +560,12 @@ export async function runToolLoop(
   const maxIterations = opts.maxIterations ?? 5;
   const callCounts = new Map<string, number>();
   const callHistory: string[] = [];
+  const executedSignatures = new Set<string>();
   let result: ChatResult = { content: "", reasoning: "", toolCalls: [] };
   let iterations = 0;
   let repeated = false;
+  let stalled = false;
+  let noProgressRounds = 0;
 
   while (iterations < maxIterations) {
     opts.signal?.throwIfAborted();
@@ -567,6 +580,7 @@ export async function runToolLoop(
 
     const calls = result.toolCalls.map((call) => repairToolCall(call, opts.tools));
     const executed: ToolCall[] = [];
+    let roundMadeProgress = false;
 
     for (const { call, error } of calls) {
       opts.signal?.throwIfAborted();
@@ -585,6 +599,10 @@ export async function runToolLoop(
         ok = false;
         opts.onEvent?.({ type: "repeat", signature });
       } else {
+        if (!executedSignatures.has(signature)) {
+          executedSignatures.add(signature);
+          roundMadeProgress = true;
+        }
         try {
           output = await opts.execTool(call, opts.signal);
         } catch (err) {
@@ -616,17 +634,36 @@ export async function runToolLoop(
       tool_calls: executed,
     });
     if (repeated) break;
+
+    // A round that executed no first-time call is treading water: repeated
+    // calls, schema failures or re-reads. A few in a row mean the model is
+    // stuck even though no single call repeated often enough to trip the
+    // repeat detector above.
+    if (roundMadeProgress) {
+      noProgressRounds = 0;
+    } else {
+      noProgressRounds += 1;
+      opts.onEvent?.({ type: "stall", rounds: noProgressRounds });
+      if (noProgressRounds >= STALL_ROUND_LIMIT) {
+        stalled = true;
+        break;
+      }
+    }
   }
 
-  // The loop exited with pending tool calls: either the round budget ran out
-  // or the model got stuck repeating itself. Make one final request without
-  // tools so it reports honestly instead of leaving the answer empty.
+  // The loop exited with pending tool calls: the round budget ran out or the
+  // model got stuck. Make one final request without tools so it reports
+  // honestly instead of leaving the answer empty.
   let roundsExhausted = false;
-  if (repeated || result.toolCalls.length > 0) {
-    roundsExhausted = !repeated && result.toolCalls.length > 0;
+  if (repeated || stalled || result.toolCalls.length > 0) {
+    roundsExhausted = !repeated && !stalled && result.toolCalls.length > 0;
     messages.push({
       role: "user",
-      content: repeated ? TOOL_REPEAT_PROMPT : TOOL_ROUNDS_EXHAUSTED_PROMPT,
+      content: repeated
+        ? TOOL_REPEAT_PROMPT
+        : stalled
+          ? TOOL_STALL_PROMPT
+          : TOOL_ROUNDS_EXHAUSTED_PROMPT,
     });
     opts.onEvent?.({
       type: "request",
@@ -647,6 +684,7 @@ export async function runToolLoop(
     iterations,
     roundsExhausted,
     repeated,
+    stalled,
     finishReason: result.finishReason ?? null,
     usage: result.usage ?? null,
   };

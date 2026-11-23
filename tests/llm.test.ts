@@ -805,4 +805,69 @@ describe("runToolLoop", () => {
     expect(events.some((event) => event.type === "repeat")).toBe(true);
     expect(loop.messages.at(-1)?.content).toContain("Stop using tools");
   });
+
+  it("stops after rounds without any new call and wraps up", async () => {
+    const events: ToolLoopEvent[] = [];
+    const execTool = vi.fn(async () => "ok");
+    // Missing required "query": the call never executes, so no round makes
+    // progress and the model never trips the identical-call repeat detector.
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "find logseq" }],
+      tools: [searchSpec],
+      send: async () => ({
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "search_graph", arguments: "{}" },
+          },
+        ],
+      }),
+      sendFinal: async () => ({ content: "Partly done", toolCalls: [] }),
+      execTool,
+      onEvent: (event) => events.push(event),
+    });
+    expect(execTool).not.toHaveBeenCalled();
+    expect(loop.stalled).toBe(true);
+    expect(loop.repeated).toBe(false);
+    expect(loop.roundsExhausted).toBe(false);
+    expect(loop.content).toBe("Partly done");
+    expect(events.some((event) => event.type === "stall")).toBe(true);
+    expect(loop.messages.at(-1)?.content).toContain("added nothing new");
+  });
+
+  it("keeps looping while rounds bring new calls", async () => {
+    const execTool = vi.fn(async () => "ok");
+    let sends = 0;
+    const loop = await runToolLoop({
+      messages: [{ role: "user", content: "work" }],
+      tools: [],
+      send: async () => {
+        sends += 1;
+        if (sends > 4) return { content: "done", toolCalls: [] };
+        // rounds: A, A (seen), B (new), B (seen) — progress resets the
+        // counter, so the loop must not stop even though half the rounds
+        // repeated an earlier call.
+        const value = sends <= 2 ? 1 : 2;
+        return {
+          content: "",
+          toolCalls: [
+            {
+              id: `c${sends}`,
+              type: "function",
+              function: { name: "t", arguments: JSON.stringify({ i: value }) },
+            },
+          ],
+        };
+      },
+      execTool,
+    });
+    expect(execTool).toHaveBeenCalledTimes(4);
+    expect(loop.stalled).toBe(false);
+    expect(loop.repeated).toBe(false);
+    expect(loop.roundsExhausted).toBe(false);
+    expect(loop.content).toBe("done");
+    expect(loop.iterations).toBe(5);
+  });
 });

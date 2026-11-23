@@ -257,13 +257,14 @@ describe("detectContextWindow", () => {
 
 describe("computeMaxToolRounds", () => {
   it("caps the rounds for a large context", () => {
-    expect(MAX_TOOL_ROUNDS).toBe(24);
-    expect(computeMaxToolRounds(32768, 2000)).toBe(14);
+    expect(MAX_TOOL_ROUNDS).toBe(48);
+    // 32768 - 2000 - 2048 = 28720 -> floor(28720/2048) = 14 -> x3 runaway guard
+    expect(computeMaxToolRounds(32768, 2000)).toBe(42);
     expect(computeMaxToolRounds(200000, 1000)).toBe(MAX_TOOL_ROUNDS);
   });
 
   it("scales down for a small context", () => {
-    expect(computeMaxToolRounds(8192, 1000)).toBe(2);
+    expect(computeMaxToolRounds(8192, 1000)).toBe(6);
     expect(computeMaxToolRounds(4096, 1000)).toBe(1);
   });
 
